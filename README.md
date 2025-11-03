@@ -20,7 +20,7 @@ Open-Weight Bio-Foundation Models </h1>
 
 <p align='center' style="text-align:center;font-size:2.5 em;">
 <b>
-    <a href="https://arxiv.org/" target="_blank" style="text-decoration: none;">Paper</a>&nbsp;|&nbsp;<a href="placeholder" target="_blank" style="text-decoration: none;">Blogpost</a>&nbsp;|&nbsp;<a href="placeholder" target="_blank" style="text-decoration: none;">Twitter</a>&nbsp;
+    <a href="https://arxiv.org/abs/2510.27629" target="_blank" style="text-decoration: none;">Paper</a>&nbsp;|&nbsp;<a href="placeholder" target="_blank" style="text-decoration: none;">Blogpost</a>&nbsp;|&nbsp;<a href="placeholder" target="_blank" style="text-decoration: none;">Twitter</a>&nbsp;
 </b>
 </p>
 
