@@ -75,13 +75,39 @@ def get_performance_results(merged_df, DMS_score_column, model_score_column, DMS
     }
 
 
-def load_esm2_model_hf(model_name: str):
+def load_esm2_model_hf(model_name: str, custom_weights_path: str = None):
     """Load ESM2 model using HuggingFace transformers."""
     print(f"Loading HuggingFace ESM2 model: {model_name}")
     
     # Load model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = EsmForMaskedLM.from_pretrained(model_name)
+    
+    # Load custom weights if provided
+    if custom_weights_path:
+        print(f"Loading custom weights from: {custom_weights_path}")
+        try:
+            custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
+            
+            # Handle different state dict formats
+            if 'model' in custom_state_dict:
+                custom_state_dict = custom_state_dict['model']
+            elif 'state_dict' in custom_state_dict:
+                custom_state_dict = custom_state_dict['state_dict']
+            
+            # Load the state dict (strict=False to allow partial loading)
+            missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
+            
+            if missing_keys:
+                print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
+            if unexpected_keys:
+                print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
+                
+            print("Custom weights loaded successfully")
+        except Exception as e:
+            print(f"Warning: Failed to load custom weights: {e}")
+            print("Continuing with pretrained weights...")
+    
     model.eval()
     
     # Move to GPU if available
@@ -92,7 +118,7 @@ def load_esm2_model_hf(model_name: str):
     return model, tokenizer
 
 
-def score_dms_dataset(dms_df: pd.DataFrame, model_name: str, batch_size: int = 8):
+def score_dms_dataset(dms_df: pd.DataFrame, model_name: str, batch_size: int = 8, custom_weights_path: str = None):
     """
     Score a DMS dataset using ESM2 pseudo-perplexity.
     
@@ -105,17 +131,18 @@ def score_dms_dataset(dms_df: pd.DataFrame, model_name: str, batch_size: int = 8
     missing_cols = [col for col in required_cols if col not in dms_df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
-    
+
     # Load model
-    model, tokenizer = load_esm2_model_hf(model_name)
-    
+    model, tokenizer = load_esm2_model_hf(model_name, custom_weights_path)
+
     # Score sequences
     print(f"Scoring {len(dms_df)} sequences...")
     sequences = dms_df['mutated_sequence'].tolist()
-    
+
     # Process in batches
     all_scores = []
     for i in range(0, len(sequences), batch_size):
+        
         batch_seqs = sequences[i:i + batch_size]
         print(f"Processing batch {i//batch_size + 1}/{(len(sequences)-1)//batch_size + 1}")
         
@@ -162,6 +189,18 @@ def main():
         default="results_hf",
         help="Output directory"
     )
+    parser.add_argument(
+        "--n-samples",
+        type=int,
+        default=None,
+        help="Number of samples to process (default: all)"
+    )
+    parser.add_argument(
+        "--custom-weights",
+        type=str,
+        default=None,
+        help="Path to custom weights file (.pt or .pth) to load into the model."
+    )
     
     args = parser.parse_args()
     
@@ -171,8 +210,13 @@ def main():
         dms_df = pd.read_csv(args.csv_path)
         print(f"Loaded {len(dms_df)} mutations")
         
+        # Sample subset if requested
+        if args.n_samples and args.n_samples < len(dms_df):
+            print(f"Sampling {args.n_samples} mutations for testing")
+            dms_df = dms_df.sample(n=args.n_samples, random_state=42).reset_index(drop=True)
+        
         # Score sequences
-        scored_df = score_dms_dataset(dms_df, args.model_name, args.batch_size)
+        scored_df = score_dms_dataset(dms_df, args.model_name, args.batch_size, args.custom_weights)
         
         # Compute performance metrics
         performance = get_performance_results(

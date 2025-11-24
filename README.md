@@ -105,6 +105,15 @@ The workflow of BioRiskEval-Gen is:
 2. The script will gather the sampled accession ids and download the sequences from NCBI.
 3. `eval_ppl.py` will compute the perplexity on the downloaded sequences, and save the results in `results/`.
 
+For ESM2 protein models, use `eval_ppl_esm2.py`:
+```bash
+python bioriskeval/gen/eval_ppl_esm2.py \
+    --fasta sequences.fasta \
+    --ckpt-path facebook/esm2_t6_8M_UR50D \
+    --output results.tsv \
+    --custom-weights path/to/weights.pt  # Optional: load custom weights
+```
+
 We have provided an example script `bioriskeval/gen/bioriskeval_gen.sh` for quick start.
 
 ### BioRiskEval-Mut
@@ -113,6 +122,14 @@ We have provided an example script `bioriskeval/gen/bioriskeval_gen.sh` for quic
 The workflow of BioRiskEval-Mut under the zero-shot/loglikelihood setting is:
 1. Process protein sequences for DMS (Deep Mutational Scanning) into nucleotides with `nucleotide_data_pipeline.py`
 2. `eval_fitness.py` calculates log-likelihood based score for auto-regressive genomic models on mutational sequences, and Spearman correlation with the ground truth experimental fitness is reported for each DMS. `eval_fitness_esm2.py` calculates scoring with masked marginals for ESM2 protein models.  
+
+For ESM2 protein models, use `eval_fitness_esm2_hf.py` (HuggingFace version):
+```bash
+python bioriskeval/mut/eval_fitness_esm2_hf.py \
+    --csv-path data/mutations.csv \
+    --model-name facebook/esm2_t6_8M_UR50D \
+    --custom-weights path/to/weights.pt  # Optional: load custom weights
+```
 
 We provide an example script `bioriskeval/mut/bioriskeval_mut_logprob.sh` for quick start. 
 
@@ -132,8 +149,63 @@ The workflow of BioRiskEval-Vir is:
 1. Extract hidden-layer representations, create train-test split (1:9) for probing.
 2. Train a linear probe on the train set, and evaluate on the test set. `train_probe_continuous.py` will train the linear probe and evaluate its performance on the test set. It will also uplaod the results to Weights & Biases and dumpe the results to a csv file.
 
+For ESM2 protein models, use the ESM2-specific scripts:
+
+1. Create probe dataset:
+```bash
+python bioriskeval/vir/create_virulence_probe_dataset_esm2.py \
+    --model_name facebook/esm2_t6_8M_UR50D \
+    --layer_number 4 \
+    --custom_weights path/to/weights.pt  # Optional: load custom weights
+```
+
+2. Train probe:
+```bash
+python bioriskeval/vir/train_probe_continuous_esm2.py \
+    --train_dataset_path probe_datasets/train.h5 \
+    --test_dataset_path probe_datasets/test.h5 \
+    --custom_weights path/to/weights.pt  # Optional: for reference only
+```
+
 We have provided an example script `bioriskeval/vir/bioriskeval_vir.sh` for quick start.
 
+## ESM2 Model Support
+
+All ESM2 scripts now support loading custom weights. The custom weights feature allows you to:
+- Load fine-tuned ESM2 models
+- Load models with custom architectures (as long as they are compatible with the base ESM2 structure)
+- Resume from training checkpoints
+
+### Custom Weights Format
+
+The scripts support several checkpoint formats:
+- Direct state dict (`.pt`, `.pth` files)
+- Checkpoints with 'model' key: `{'model': state_dict, ...}`
+- Checkpoints with 'state_dict' key: `{'state_dict': state_dict, ...}`
+
+### Usage Examples
+
+```bash
+# Generation evaluation with custom weights
+python bioriskeval/gen/eval_ppl_esm2.py \
+    --fasta sequences.fasta \
+    --ckpt-path facebook/esm2_t6_8M_UR50D \
+    --custom-weights /path/to/custom_weights.pt \
+    --output results.tsv
+
+# Mutation fitness evaluation with custom weights
+python bioriskeval/mut/eval_fitness_esm2_hf.py \
+    --csv-path data/mutations.csv \
+    --model-name facebook/esm2_t6_8M_UR50D \
+    --custom-weights /path/to/custom_weights.pt
+
+# Virulence probe dataset creation with custom weights
+python bioriskeval/vir/create_virulence_probe_dataset_esm2.py \
+    --model_name facebook/esm2_t6_8M_UR50D \
+    --custom_weights /path/to/custom_weights.pt
+```
+
+Note: If custom weight loading fails, the scripts will fall back to using the pretrained weights with a warning message.
 
 ## Fine-Tuning & Probing
 

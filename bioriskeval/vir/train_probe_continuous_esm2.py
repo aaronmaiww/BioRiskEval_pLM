@@ -180,6 +180,7 @@ if __name__ == "__main__":
     # Wandb arguments
     parser.add_argument("--output_csv", type=str, default="probe_results_continuous.csv")
     parser.add_argument("--normalize_features", action="store_true", help="Normalize features")
+    parser.add_argument("--custom_weights", type=str, default=None, help="Path to custom weights file (.pt or .pth) for ESM2 model (note: this script uses pre-extracted representations)")
     args = parser.parse_args()
     
 
@@ -237,7 +238,7 @@ if __name__ == "__main__":
     with result_file.open("a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["train_dataset_path", "test_dataset_path", "method", "probing_layer","learning_rate", "batch_size", "num_steps", "num_epochs", "loss", "rmse", "mae", "r2", "pearson", "shuffle_labels"])
+            writer.writerow(["train_dataset_path", "test_dataset_path", "method", "probing_layer","learning_rate", "batch_size", "num_steps", "num_epochs", "loss", "rmse", "mae", "r2", "pearson", "shuffle_labels", "custom_weights"])
         
         method = "closed_form" if args.use_closed_form else "iterative"
         learning_rate = "N/A" if args.use_closed_form else args.learning_rate
@@ -250,5 +251,6 @@ if __name__ == "__main__":
 
         probing_layer = args.train_dataset_path.split("layer")[1].split("_")[1]
         
-        writer.writerow([train_path_name, test_path_name, method, probing_layer, learning_rate, batch_size, num_steps, num_epochs, loss, f"{rmse:.6f}", f"{mae:.6f}", f"{r2:.6f}", f"{pearson:.6f}", args.shuffle_labels])
+        custom_weights_info = "N/A" if not args.custom_weights else os.path.basename(args.custom_weights)
+        writer.writerow([train_path_name, test_path_name, method, probing_layer, learning_rate, batch_size, num_steps, num_epochs, loss, f"{rmse:.6f}", f"{mae:.6f}", f"{r2:.6f}", f"{pearson:.6f}", args.shuffle_labels, custom_weights_info])
     

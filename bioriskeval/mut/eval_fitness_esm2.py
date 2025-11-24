@@ -17,15 +17,12 @@ import tempfile
 import glob
 import traceback
 
-from nemo import lightning as nl
+# HuggingFace imports for ESM2
+from transformers import AutoTokenizer, EsmForMaskedLM
+import torch.nn.functional as F
 
-from bionemo.esm2.api import ESM2Config
-from bionemo.esm2.data.tokenizer import get_tokenizer
-from bionemo.esm2.model.finetune.datamodule import ESM2FineTuneDataModule
-from bionemo.esm2.model.finetune.dataset import InMemoryProteinDataset
-from bionemo.llm.utils.datamodule_utils import infer_global_batch_size
-from bionemo.llm.model.biobert.lightning import biobert_lightning_module
-from bionemo.llm.utils.callbacks import PredictionWriter
+# Import HuggingFace scoring function from our eval_ppl_esm2 module
+from bioriskeval.gen.eval_ppl_esm2 import compute_pseudo_ppl_hf
 
 
 def stratified_sample_dms(df, n_samples, stratify_column='DMS_score_bin', random_state=42):
@@ -673,6 +670,45 @@ def _score_pseudo_ppl_batch(seqs: List[str], module, tokenizer) -> List[float]:
     return scores
 
 
+def load_esm2_model_hf(model_name: str = "facebook/esm2_t6_8M_UR50D", custom_weights_path: str = None):
+    """Load ESM2 model using HuggingFace transformers."""
+    print(f"Loading HuggingFace ESM2 model: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = EsmForMaskedLM.from_pretrained(model_name)
+    
+    # Load custom weights if provided
+    if custom_weights_path:
+        print(f"Loading custom weights from: {custom_weights_path}")
+        try:
+            custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
+            
+            # Handle different state dict formats
+            if 'model' in custom_state_dict:
+                custom_state_dict = custom_state_dict['model']
+            elif 'state_dict' in custom_state_dict:
+                custom_state_dict = custom_state_dict['state_dict']
+            
+            # Load the state dict (strict=False to allow partial loading)
+            missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
+            
+            if missing_keys:
+                print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
+            if unexpected_keys:
+                print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
+                
+            print("Custom weights loaded successfully")
+        except Exception as e:
+            print(f"Warning: Failed to load custom weights: {e}")
+            print("Continuing with pretrained weights...")
+    
+    model.eval()
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    
+    return model, tokenizer
+
+
 @torch.no_grad()
 def _score_masked_marginals(wt_seq: str, module, tokenizer) -> torch.Tensor:
     """Return tensor of shape [seq_len_tokenized, vocab] with log-probs at each position."""
@@ -1002,10 +1038,10 @@ def process_h5_dms_data(h5_path: str, args, DMS_reference_df):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='ESM2 model fitness evaluation')
     parser.add_argument(
-        "--ckpt-dir",
-        type=Path,
-        required=True,
-        help="ESM2 checkpoint directory for inference, or a BioNeMo model tag (e.g., 'esm2/8m:2.0', 'esm2/nv_650m:2.1').",
+        "--model-name",
+        type=str,
+        default="facebook/esm2_t6_8M_UR50D",
+        help="HuggingFace ESM2 model name (e.g., 'facebook/esm2_t6_8M_UR50D', 'facebook/esm2_t33_650M_UR50D').",
     )
     # Inference/parallelism args (aligned with ESM2 infer)
     parser.add_argument(
@@ -1077,6 +1113,8 @@ if __name__ == '__main__':
     # REST evaluation options
     parser.add_argument('--rest-eval', action='store_true', help='Evaluate REST split; route outputs to rest_results_dir and skip JSON metadata dependence in paths')
     parser.add_argument('--rest-results-dir', type=str, default="results/virus_reproduction/rest", help='Directory to save REST evaluation outputs')
+    # Custom weights option
+    parser.add_argument('--custom-weights', type=str, default=None, help='Path to custom weights file (.pt or .pth) to load into the ESM2 model')
 
     args = parser.parse_args()
 

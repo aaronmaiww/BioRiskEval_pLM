@@ -68,12 +68,13 @@ def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str
     
     return scores
 
-def load_esm2_model(ckpt_path: str) -> tuple:
+def load_esm2_model(ckpt_path: str, custom_weights_path: str = None) -> tuple:
     """
     Load ESM2 model using HuggingFace transformers.
     
     Args:
         ckpt_path (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D")
+        custom_weights_path (str, optional): Path to custom weights file (.pt or .pth)
     Returns:
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
@@ -81,8 +82,33 @@ def load_esm2_model(ckpt_path: str) -> tuple:
     # Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     model = EsmForMaskedLM.from_pretrained(ckpt_path)
-    model.eval()
     
+    # Load custom weights if provided
+    if custom_weights_path:
+        print(f"Loading custom weights from: {custom_weights_path}")
+        try:
+            custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
+            
+            # Handle different state dict formats
+            if 'model' in custom_state_dict:
+                custom_state_dict = custom_state_dict['model']
+            elif 'state_dict' in custom_state_dict:
+                custom_state_dict = custom_state_dict['state_dict']
+            
+            # Load the state dict (strict=False to allow partial loading)
+            missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
+            
+            if missing_keys:
+                print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
+            if unexpected_keys:
+                print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
+                
+            print("Custom weights loaded successfully")
+        except Exception as e:
+            print(f"Warning: Failed to load custom weights: {e}")
+            print("Continuing with pretrained weights...")
+    
+    model.eval()
     return model, tokenizer
 
 def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
@@ -103,7 +129,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
-                  batch_size: int = 32, aggregate: str = "mean") -> Dict[str, float]:
+                  batch_size: int = 32, aggregate: str = "mean", custom_weights_path: str = None) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -116,7 +142,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         dict: A dictionary mapping sequence IDs to their perplexity scores.
     """
     # Load ESM2 model using HuggingFace
-    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path)
+    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path, custom_weights_path=custom_weights_path)
     
     # Load sequences from FASTA file
     sequences, seq_ids = load_sequences_from_fasta(fasta_path)
@@ -160,6 +186,12 @@ def main():
         help="HuggingFace model name (e.g., 'facebook/esm2_t6_8M_UR50D', 'facebook/esm2_t33_650M_UR50D').",
     )
     parser.add_argument(
+        "--custom-weights",
+        type=str,
+        default=None,
+        help="Path to custom weights file (.pt or .pth) to load into the model.",
+    )
+    parser.add_argument(
         "--aggregate",
         type=str,
         default="mean",
@@ -190,7 +222,8 @@ def main():
         fasta_path=args.fasta,
         ckpt_path=args.ckpt_path,
         batch_size=args.batch_size,
-        aggregate=args.aggregate
+        aggregate=args.aggregate,
+        custom_weights_path=args.custom_weights
     )
 
     # Save results to output file
