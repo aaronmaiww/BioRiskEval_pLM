@@ -120,13 +120,12 @@ We have provided an example script `bioriskeval/gen/bioriskeval_gen.sh` for quic
 
 
 The workflow of BioRiskEval-Mut under the zero-shot/loglikelihood setting is:
-1. Process protein sequences for DMS (Deep Mutational Scanning) into nucleotides with `nucleotide_data_pipeline.py`
-2. `eval_fitness.py` calculates log-likelihood based score for auto-regressive genomic models on mutational sequences, and Spearman correlation with the ground truth experimental fitness is reported for each DMS. `eval_fitness_esm2.py` calculates scoring with masked marginals for ESM2 protein models.  
+`eval_fitness.py` calculates log-likelihood-based scores for auto-regressive genomic models on mutational sequences, and Spearman correlation with the ground truth experimental fitness is reported for each DMS. `eval_fitness_esm2.py` calculates scoring with masked marginals for ESM2 protein models.  
 
 For ESM2 protein models, use `eval_fitness_esm2_hf.py` (HuggingFace version):
 ```bash
 python bioriskeval/mut/eval_fitness_esm2_hf.py \
-    --csv-path data/mutations.csv \
+    --csv-path bioriskeval/mut/data/DMS_ProteinGym_substitutions/DMS_substitutions.csv \
     --model-name facebook/esm2_t6_8M_UR50D \
     --custom-weights path/to/weights.pt  # Optional: load custom weights
 ```
