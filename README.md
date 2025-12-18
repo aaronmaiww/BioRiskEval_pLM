@@ -118,9 +118,10 @@ We have provided an example script `bioriskeval/gen/bioriskeval_gen.sh` for quic
 
 ### BioRiskEval-Mut
 
+#### Zero-shot
 
 The workflow of BioRiskEval-Mut under the zero-shot/loglikelihood setting is:
-`eval_fitness.py` calculates log-likelihood-based scores for auto-regressive genomic models on mutational sequences, and Spearman correlation with the ground truth experimental fitness is reported for each DMS. `eval_fitness_esm2.py` calculates scoring with masked marginals for ESM2 protein models.  
+`eval_fitness.py` calculates log-likelihood-based scores for auto-regressive genomic models on mutational sequences, and Spearman correlation with the ground truth experimental fitness is reported for each DMS. `eval_fitness_esm2_hf.py` calculates scoring with masked marginals for ESM2 protein models.  
 
 For ESM2 protein models, use `eval_fitness_esm2_hf.py` (HuggingFace version):
 ```bash
@@ -130,8 +131,7 @@ python bioriskeval/mut/eval_fitness_esm2_hf.py \
     --custom-weights path/to/weights.pt  # Optional: load custom weights
 ```
 
-We provide an example script `bioriskeval/mut/bioriskeval_mut_logprob.sh` for quick start. 
-
+#### Probing
 
 The workflow of BioRiskEval-Mut under the probe setting is:
 1. Pick $k$ numbers of mutations from each DMS to fit linear probes. Within the k mutations, 80% are used to fit and 20% are used as the validation split. Rest of the data is used as test split. `create_dms_probe_dataset.py` create the splits and saves representations for train and val splits.
