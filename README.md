@@ -1,42 +1,5 @@
-<h1 align='center' style="text-align:center; font-weight:bold; font-size:2.0em;letter-spacing:2.0px;"> Best Practices for Biorisk Evaluations on
-Open-Weight Bio-Foundation Models </h1>
-<p align='center' style="text-align:center;font-size:1.25em;">
-    <a href="https://www.boyiwei.com/" target="_blank" style="text-decoration: none;">Boyi Wei<sup>1,2*†</sup></a>&nbsp;,&nbsp;
-    <a href="https://zora-che.com/" target="_blank" style="text-decoration: none;">Zora Che<sup>1,3*†</sup></a>&nbsp;,&nbsp;
-    <a href="https://nat.ml/" target="_blank" style="text-decoration: none;">Nathaniel Li<sup>1†</sup></a>&nbsp;,&nbsp;
-    <a href="https://udarimadhu.github.io/" target="_blank" style="text-decoration: none;">Udari Madhushani Sehwag<sup>1</sup></a>&nbsp;,&nbsp;
-    <a href="https://scholar.google.com/citations?user=oIxfYg0AAAAJ&hl=en" target="_blank" style="text-decoration: none;">Jasper Götting <sup>4</sup></a>&nbsp;,&nbsp;
-    <a href="https://scholar.google.com/citations?user=Y_CxxGkAAAAJ&hl=en" target="_blank" style="text-decoration: none;">Samira Nedungadi<sup>4</sup></a>&nbsp;,&nbsp;
-    <a href="https://julianmichael.org/" target="_blank" style="text-decoration: none;">Julian Michael<sup>1†</sup></a>&nbsp;,&nbsp;
-    <a href="https://www.linkedin.com/in/yutingyue/" target="_blank" style="text-decoration: none;">Summer Yue<sup>1†</sup></a>&nbsp;,&nbsp;
-    <a href="https://danhendrycks.com/" target="_blank" style="text-decoration: none;">Dan Hendrycks<sup>5</sup></a>&nbsp;,&nbsp;
-    <a href="https://www.peterhenderson.co/" target="_blank" style="text-decoration: none;">Peter Henderson<sup>2</sup></a>&nbsp;,&nbsp;
-    <a href="https://sites.google.com/west.cmu.edu/zifan-wang/" target="_blank" style="text-decoration: none;">Zifan Wang<sup>1†</sup></a>&nbsp;,&nbsp;
-    <a href="https://www.sethdonoughe.com/" target="_blank" style="text-decoration: none;">Seth Donoughe<sup>4</sup></a>&nbsp;,&nbsp;
-    <a href="https://scholar.google.com/citations?user=fGeEmLQAAAAJ&hl=en" target="_blank" style="text-decoration: none;">Mantas Mazeika<sup>5</sup></a>&nbsp;&nbsp; 
-    <br/> 
-<sup>*</sup>Equal Contribution&nbsp;&nbsp;&nbsp;&nbsp;<sup>†</sup>Work done while at Scale AI<br>
-<sup>1</sup>Scale AI&nbsp;&nbsp;&nbsp;&nbsp;<sup>2</sup>Princeton University&nbsp;&nbsp;&nbsp;&nbsp;<sup>3</sup>University of Maryland&nbsp;&nbsp;&nbsp;&nbsp;<sup>4</sup>SecureBio&nbsp;&nbsp;&nbsp;&nbsp;<sup>5</sup>Center for AI Safety<br/> 
-</p>
+# Built on top of [BioRiskEval](https://github.com/scaleapi/BioRiskEval)
 
-<p align='center' style="text-align:center;font-size:2.5 em;">
-<b>
-    <a href="https://arxiv.org/" target="_blank" style="text-decoration: none;">Paper</a>&nbsp;|&nbsp;<a href="placeholder" target="_blank" style="text-decoration: none;">Blogpost</a>&nbsp;|&nbsp;<a href="placeholder" target="_blank" style="text-decoration: none;">Twitter</a>&nbsp;
-</b>
-</p>
-
-<!-- <img src="assets/main.png" width="500" style="display: block; margin: auto;"/>
-
-<img src="assets/radar_chart_animation.gif" width="500"/> -->
-
-<div align="center">
-  <img src="assets/main.png" width="800" style="display: inline-block; margin-right: 10px;"/>
-</div>
-
-
-This repository is built on the top of the [BioNeMo Framework](https://github.com/NVIDIA/bionemo-framework). With two additional modules:
-1. `bioriskeval/`: An evaluation framework for assessing the dual-use risk of bio-foundation models.
-2. `attack/`: Contains scripts for fine-tuning. We included the scripts for probing in `bioriskeval/vir` and `bioriskeval/mut`.
 
 ## Installation
 
