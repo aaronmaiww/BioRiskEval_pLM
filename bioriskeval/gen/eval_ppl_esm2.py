@@ -171,7 +171,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate perplexity of sequences using ESM2 model with BioNeMo."
+        description="Evaluate perplexity of sequences using ESM2 models."
     )
     parser.add_argument(
         "--fasta",
@@ -225,10 +225,32 @@ def main():
         aggregate=args.aggregate,
         custom_weights_path=args.custom_weights
     )
-
-    # Save results to output file
+    
+    # Save results with config details
+    import datetime
+    import os
+    
+    # Create config info
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    config_info = {
+        "timestamp": timestamp,
+        "model": args.ckpt_path,
+        "custom_weights": args.custom_weights or "None",
+        "fasta_file": args.fasta,
+        "batch_size": args.batch_size,
+        "aggregation": args.aggregate,
+        "total_sequences": len(results)
+    }
+    
     with open(args.output, "w") as f:
-        f.write("sequence_id\tperplexity\n")  # Header
+        # Write config header as comments
+        f.write("# ESM2 Perplexity Evaluation Results\n")
+        for key, value in config_info.items():
+            f.write(f"# {key}: {value}\n")
+        f.write("#\n")
+        
+        # Write data header and results
+        f.write("sequence_id\tperplexity\n")
         for seq_id, ppl in results.items():
             f.write(f"{seq_id}\t{ppl}\n")
     

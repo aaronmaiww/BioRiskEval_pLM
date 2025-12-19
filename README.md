@@ -100,21 +100,48 @@ The hierarchy of BioRiskEval is:
 - BioRiskEval-Vir (`bioriskeval/vir`): Virulence prediction evaluation. Metric: Pearson correlation, $R^2$
 
 ### BioRiskEval-Gen
-The workflow of BioRiskEval-Gen is:
-1. Sample examples from `human_host_df.csv`, specify the species name, genus name, or family name.
-2. The script will gather the sampled accession ids and download the sequences from NCBI.
-3. `eval_ppl.py` will compute the perplexity on the downloaded sequences, and save the results in `results/`.
+The workflow of BioRiskEval-Gen evaluates protein language models on viral protein sequences using curated taxonomic exclusion tiers:
 
-For ESM2 protein models, use `eval_ppl_esm2.py`:
+#### Step 1: Download Viral Protein Sequences
+Download protein sequences for specific viral taxonomic groups using pre-curated taxid lists:
+
+```bash
+python bioriskeval/gen/download_taxid_proteins.py \
+    --tier-file path/to/tier_file_taxids.txt \
+    --output-dir viral_proteins_output \
+    --batch-size 50
+```
+
+This script:
+- Reads taxids from viral exclusion tier files (e.g., tier1_all_viruses_taxids.txt)
+- Downloads protein sequences from NCBI using E-utilities API
+- Creates individual FASTA files per taxid and a merged file for analysis
+
+#### Step 2: Evaluate Perplexity with ESM2
+Compute perplexity scores on the downloaded viral proteins:
+
 ```bash
 python bioriskeval/gen/eval_ppl_esm2.py \
-    --fasta sequences.fasta \
+    --fasta viral_proteins_output/merged_viral_proteins.faa \
     --ckpt-path facebook/esm2_t6_8M_UR50D \
     --output results.tsv \
+    --batch-size 4 \
     --custom-weights path/to/weights.pt  # Optional: load custom weights
 ```
 
-We have provided an example script `bioriskeval/gen/bioriskeval_gen.sh` for quick start.
+#### Output Format
+Results are saved as TSV files with configuration metadata:
+```
+# ESM2 Perplexity Evaluation Results
+# timestamp: 2025-12-19 16:50:23
+# model: facebook/esm2_t6_8M_UR50D
+# custom_weights: None
+# total_sequences: 760
+#
+sequence_id    perplexity
+AAP04003.1     17.2836
+AAQ63890.1     14.1361
+```
 
 ### BioRiskEval-Mut
 
