@@ -60,37 +60,6 @@ bash download_data.sh
 You may need to first get access to the huggingface dataset before downloading. The script will download BioRiskEval-Gen into `bioriskeval/gen/data/`, BioRiskEval-Mut into `bioriskeval/mut/data/`, and BioRiskEval-Vir into `bioriskeval/vir/data/`. For BioRiskEval-Mut, we have two sets of data: `DMS_ProteinGym_substitutions` and `DMS_Probe`. `DMS_ProteinGym_substitutions` contains 16 DMS datasets collected from ProteinGym and is used for log-likelihood based evaluation. `DMS_Probe` is the dataset used for probe based evaluation. You can also generate `DMS_Probe` by running `dms/probe/create_dms_probe_dataset.py`.
 
 
-#### Build the docker image
-With a locally cloned repository and initialized submodules, build the container using:
-
-```bash
-docker buildx build . -t my-container-tag
-```
-
-#### VSCode Devcontainer for Interactive Debugging
-
-We distribute a [development container](https://devcontainers.github.io/) configuration for vscode
-(`.devcontainer/devcontainer.json`) that simplifies the process of local testing and development. Opening the
-BioRiskEval folder with VSCode should prompt you to re-open the folder inside the devcontainer environment.
-
-> [!NOTE]
-> The first time you launch the devcontainer, it may take a long time to build the image. Building the image locally
-> (using the command shown above) will ensure that most of the layers are present in the local docker cache.
-
-
-We highly recommend to run the experiments on H100 GPUs.
-
-
-
-
-### Convert Checkpoints
-After installation, BioNemo Framework needs to first convert the Evo2-Vortex checkpoint to NeMo2 checkpoint. This can be done by running the following script:
-
-```bash
-evo2_convert_to_nemo2 \
-  --model-path hf://arcinstitute/savanna_evo2_7b \
-  --model-size 7b_arc_longcontext --output-dir /your/checkpoint/dir/nemo2_evo2_7b_1m
-```
 
 
 ## BioRiskEval
