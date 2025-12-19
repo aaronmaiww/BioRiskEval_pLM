@@ -88,6 +88,8 @@ python bioriskeval/mut/eval_fitness_esm2_hf.py \
 
 #### Probing
 
+**Note: The probing modules in BioRiskEval-Mut are currently not compatible with HuggingFace ESM2 models. They require the BioNeMo Framework for representation extraction and are excluded from ESM2 workflows.**
+
 The workflow of BioRiskEval-Mut under the probe setting is:
 1. Pick $k$ numbers of mutations from each DMS to fit linear probes. Within the k mutations, 80% are used to fit and 20% are used as the validation split. Rest of the data is used as test split. `create_dms_probe_dataset.py` create the splits and saves representations for train and val splits.
 2. Sweep over all layers with `sweep_dms_probe.py` to find the best layer for fitting the linear probe. Best probe based on train RMSE or validation split spearman are saved.
