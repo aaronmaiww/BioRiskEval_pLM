@@ -137,43 +137,9 @@ The scripts support several checkpoint formats:
 - Checkpoints with 'model' key: `{'model': state_dict, ...}`
 - Checkpoints with 'state_dict' key: `{'state_dict': state_dict, ...}`
 
-### Usage Examples
-
-```bash
-# Generation evaluation with custom weights
-python bioriskeval/gen/eval_ppl_esm2.py \
-    --fasta sequences.fasta \
-    --ckpt-path facebook/esm2_t6_8M_UR50D \
-    --custom-weights /path/to/custom_weights.pt \
-    --output results.tsv
-
-# Mutation fitness evaluation with custom weights
-python bioriskeval/mut/eval_fitness_esm2_hf.py \
-    --csv-path data/mutations.csv \
-    --model-name facebook/esm2_t6_8M_UR50D \
-    --custom-weights /path/to/custom_weights.pt
-
-# Virulence probe dataset creation with custom weights
-python bioriskeval/vir/create_virulence_probe_dataset_esm2.py \
-    --model_name facebook/esm2_t6_8M_UR50D \
-    --custom_weights /path/to/custom_weights.pt
-```
-
 Note: If custom weight loading fails, the scripts will fall back to using the pretrained weights with a warning message.
 
-## Fine-Tuning & Probing
-
-### Fine-tuning
-Inside `attack/`, we have the scripts for fine-tuning.
-
-The workflow of fine-tuning is:
-1. Have the csv file with accession ids in column `#Accession`
-2. Convert the csv file to fna file using `convert_csv_to_fna.py`
-3. Create the train-val split, tokenize the data
-4. Create dataset config for fine-tuning
-5. Fine-tune the model
-
-We provide an example script in `attack/data/preprocess_ft_data.sh` (preprocess data, step 1-4) and `attack/ft/launch_ft_7b_1m.sh` (fine-tuning the model, step 5) for quick start, in which you can modify the csv file path and change the preprocess config.
+## Probing
 
 ### Probing
 
