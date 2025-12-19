@@ -3,10 +3,6 @@
 
 ## Installation
 
-### Build the docker image and develop environment
-
-Following the same steps in [Getting Started with BioNeMo Framework](https://github.com/NVIDIA/bionemo-framework?tab=readme-ov-file#getting-started-with-bionemo-framework), you can run the following scrips to clone the reposiotry and build the docker image:
-
 #### Download the repository
 ```bash
 git clone --recursive git@github.com:boyiwei/BioRiskEval.git
