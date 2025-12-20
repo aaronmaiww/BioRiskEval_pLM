@@ -101,29 +101,40 @@ We provide an example script `bioriskeval/mut/bioriskeval_mut_probe.sh` for quic
 
 
 ### BioRiskEval-Vir
-The workflow of BioRiskEval-Vir is:
-1. Extract hidden-layer representations, create train-test split (1:9) for probing.
-2. Train a linear probe on the train set, and evaluate on the test set. `train_probe_continuous.py` will train the linear probe and evaluate its performance on the test set. It will also uplaod the results to Weights & Biases and dumpe the results to a csv file.
 
-For ESM2 protein models, use the ESM2-specific scripts:
+**Note: BioRiskEval-Vir has been simplified to focus exclusively on ESM2/HuggingFace workflows. BioNeMo-dependent files have been removed.**
 
-1. Create probe dataset:
+The workflow of BioRiskEval-Vir for ESM2 models is:
+
+1. **Create probe dataset** - Extract hidden-layer representations and create train-test split:
 ```bash
 python bioriskeval/vir/create_virulence_probe_dataset_esm2.py \
     --model_name facebook/esm2_t6_8M_UR50D \
-    --layer_number 4 \
+    --layer_number ${layer_num} \
+    --dataset_path data/influenza_virulence_ld50_cleaned_BALB_C.csv \
+    --output_dir probe_datasets \
+    --n_samples 625 \
+    --batch_size 8 \
     --custom_weights path/to/weights.pt  # Optional: load custom weights
 ```
 
-2. Train probe:
+**Note:** Run this script for each layer you want to evaluate (e.g., layers 0-5 for esm2_t6_8M_UR50D) to compare performance across layers.
+
+2. **Train probe** - Train linear probe and evaluate performance:
 ```bash
 python bioriskeval/vir/train_probe_continuous_esm2.py \
-    --train_dataset_path probe_datasets/train.h5 \
-    --test_dataset_path probe_datasets/test.h5 \
-    --custom_weights path/to/weights.pt  # Optional: for reference only
+    --train_dataset_path probe_datasets/virulence_probe_dataset_facebook_esm2_t6_8M_UR50D_layer_${layer_num}_train.h5 \
+    --test_dataset_path probe_datasets/virulence_probe_dataset_facebook_esm2_t6_8M_UR50D_layer_${layer_num}_test.h5 \
+    --output_csv probe_results_layer_${layer_num}.csv \
+    --use_closed_form
 ```
 
-We have provided an example script `bioriskeval/vir/bioriskeval_vir.sh` for quick start.
+**Key arguments:**
+- `--use_closed_form`: Use analytical solution (recommended for speed and stability)
+- `--output_csv`: Results file with performance metrics (RMSE, MAE, R², Pearson correlation)
+- `--num_steps` / `--learning_rate`: For iterative training (if not using closed form)
+
+The training script evaluates on the test set and appends results to the specified CSV file.
 
 ## ESM2 Model Support
 
@@ -143,14 +154,12 @@ Note: If custom weight loading fails, the scripts will fall back to using the pr
 
 ## Probing
 
-### Probing
-
-The workflow of probing is:
+The general workflow of probing is:
 1. Extract the hidden-layer representations from the model
-3. Train a linear probe on the train set
-4. Evaluate the probe on the test set
+2. Train a linear probe on the train set
+3. Evaluate the probe on the test set
 
-Refer to the example scripts `bioriskeval/vir/bioriskeval_vir.sh` for quick start.
+For specific implementations, refer to the BioRiskEval-Vir section above for ESM2-compatible probing workflows.
 
 ## Reproducibility
 We documented the results in `attack/analysis/`, which contains the raw results and scripts for analysis and plotting.

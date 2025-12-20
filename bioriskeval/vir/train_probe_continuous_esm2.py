@@ -145,7 +145,7 @@ def evaluate_probe(probe, test_representations, test_labels, args=None):
             pearson = 0.0
         
         # Log test metrics to wandb
-        if args and args.wandb:
+        if args and hasattr(args, 'wandb') and args.wandb:
             wandb.log({
                 "test/mse": mse,
                 "test/rmse": rmse,
@@ -246,9 +246,7 @@ if __name__ == "__main__":
         num_steps = "N/A" if args.use_closed_form else args.num_steps
         num_epochs = "N/A" if args.use_closed_form else args.num_epochs
         loss = "N/A" if args.use_closed_form else args.loss
-        # Extract the value immediately after "layer" in the filename
-        filename = args.train_dataset_path.split("/")[-1].replace(".h5", "")
-
+        # Extract probing layer from filename
         probing_layer = args.train_dataset_path.split("layer")[1].split("_")[1]
         
         custom_weights_info = "N/A" if not args.custom_weights else os.path.basename(args.custom_weights)

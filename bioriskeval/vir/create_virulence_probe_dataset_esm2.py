@@ -85,7 +85,11 @@ def load_esm2_model_hf(model_name: str, custom_weights_path: str = None):
     return model, tokenizer, device
     
 
-def extract_representations_batch(sequences: List[str], model, tokenizer, device: str, layer_numbers: List[int]) -> Dict[int, np.ndarray]:
+def extract_representations_batch(sequences: List[str], 
+                                  model, 
+                                  tokenizer, 
+                                  device: str, 
+                                  layer_numbers: List[int]) -> Dict[int, np.ndarray]:
     """
     Extract representations from specified layers for a batch of sequences.
     
@@ -130,7 +134,7 @@ def extract_representations_batch(sequences: List[str], model, tokenizer, device
 
 def create_probe_dataset_hf(args):
     """Create probe dataset using HuggingFace ESM2."""
-    
+
     # Load data
     logger.info(f"Loading data from: {args.dataset_path}")
     df = pd.read_csv(args.dataset_path)
@@ -203,9 +207,7 @@ def create_probe_dataset_hf(args):
     
     logger.info("Dataset creation completed!")
 
-    
-    
-   
+
 def parse_layer_info(layer_name):
     """Parse layer name to extract layer number and type."""
     parts = layer_name.split('.')
@@ -229,7 +231,7 @@ def parse_layer_info(layer_name):
         return f"_{parts[-1]}" if parts else ""
     
         
-def initialize_hdf5_file(output_path, metadata, total_sequences, labels_dtype: str, hidden_dim):
+def initialize_hdf5_file(output_path, metadata, labels_dtype: str, hidden_dim):
     """Initialize HDF5 file with resizable datasets.
 
     labels_dtype: 'float32' for continuous targets, 'int64' for binary.
@@ -254,7 +256,6 @@ def initialize_hdf5_file(output_path, metadata, total_sequences, labels_dtype: s
 
 def append_to_hdf5(output_path, sequences, representations, labels, hidden_dim):
     """Append data to existing HDF5 file."""
-    import h5py
     with h5py.File(output_path, 'a') as f:
         # Access datasets with explicit typing to satisfy linters
         seq_ds = cast(h5py.Dataset, f['sequences'])
