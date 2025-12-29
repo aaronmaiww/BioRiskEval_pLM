@@ -1,4 +1,5 @@
 # goal get esm2-ppl for fasta sequences 
+# Optimized for RTX 5090 32GB
 
 import argparse
 import contextlib
@@ -9,11 +10,15 @@ import time
 import numpy as np
 import gc
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 from transformers import AutoTokenizer, EsmForMaskedLM
 import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
+
+# Performance optimizations
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
 MODELS = [
     # 8M
@@ -83,23 +88,22 @@ def prepare_batch_tensors(
         expanded_input_ids = expanded_input_ids.pin_memory()
         expanded_attention = expanded_attention.pin_memory()
     
-    # Build position and target tensors on CPU
-    position_tensors = [
-        torch.arange(1, int(length.item()) - 1) if int(length.item()) > 1
-        else torch.tensor([], dtype=torch.long)
-        for length in seq_lengths
-    ]
-    positions_flat = torch.cat(position_tensors)
+    # VECTORIZED position tensor building (no Python loop!)
+    # Create cumulative offsets for each sequence
+    cumsum = torch.cat([torch.tensor([0]), positions_per_seq.cumsum(0)[:-1]])
     
-    # Create seq_indices on CPU
+    # Create all positions using vectorized operations
+    positions_flat = torch.arange(total_positions, dtype=torch.long)
     seq_indices = torch.arange(batch_size).repeat_interleave(positions_per_seq)
     
-    # Get target tokens
-    token_targets_flat = input_ids.repeat_interleave(positions_per_seq, dim=0)[
-        torch.arange(total_positions), positions_flat
-    ]
+    # Compute local positions within each sequence (offset by 1 for CLS token)
+    local_positions = positions_flat - cumsum[seq_indices] + 1
+    positions_flat = local_positions
     
-    # Apply mask
+    # Get target tokens using advanced indexing
+    token_targets_flat = input_ids[seq_indices, positions_flat]
+    
+    # Apply mask token
     mask_id = tokenizer.mask_token_id
     expanded_input_ids[torch.arange(total_positions), positions_flat] = mask_id
     
@@ -524,7 +528,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
                   batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
                   max_seq_len: int = 1024, use_fp16: bool = True, mask_chunk_size: int = 512,
-                  num_prefetch: int = 2) -> Dict[str, float]:
+                  num_prefetch: int = 2, use_compile: bool = False) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -535,6 +539,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         aggregate (str): "sum" for total log-likelihood, "mean" for average log-likelihood
         mask_chunk_size (int): Number of masked positions evaluated per forward.
         num_prefetch (int): Number of batches to prefetch in background (default 2).
+        use_compile (bool): Use torch.compile() for model optimization (PyTorch 2.0+).
     Returns:
         dict: A dictionary mapping sequence IDs to their perplexity scores.
     """
@@ -559,7 +564,21 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         else:
             print(f"Model loaded on {device} with FP32 precision")
         torch.backends.cudnn.benchmark = True
+        
+        # Enable Flash Attention if available (PyTorch 2.0+)
+        if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            print("Flash Attention enabled")
+        
         print_gpu_memory_info("after model loading")
+    
+    # Apply torch.compile for optimized execution (PyTorch 2.0+)
+    if use_compile and hasattr(torch, 'compile'):
+        print("Compiling model with torch.compile()...")
+        compile_start = time.time()
+        model = torch.compile(model, mode="reduce-overhead", fullgraph=False)
+        print(f"Model compiled in {time.time() - compile_start:.2f}s")
     
     model_load_time = time.time() - model_load_start
     
@@ -735,6 +754,12 @@ def main():
         help="Number of batches to prefetch in background (default 2). Increase for better GPU utilization.",
     )
     parser.add_argument(
+        "--use-compile",
+        action="store_true",
+        default=True,
+        help="Use torch.compile() for model optimization (PyTorch 2.0+). ~20-40%% faster after warmup.",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -763,6 +788,7 @@ def main():
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
             "use_fp16": args.use_fp16,
+            "use_compile": args.use_compile,
             "num_prefetch": args.num_prefetch,
             "aggregation": args.aggregate,
             "fasta_path": fasta_path,
@@ -781,6 +807,7 @@ def main():
     print(f"Mask chunk size: {args.mask_chunk_size}")
     print(f"Prefetch batches: {args.num_prefetch}")
     print(f"Use FP16: {args.use_fp16}")
+    print(f"Use torch.compile: {args.use_compile}")
     print(f"Aggregation method: {args.aggregate}")
 
     results = eval_ppl_esm2(
@@ -793,6 +820,7 @@ def main():
         use_fp16=args.use_fp16,
         mask_chunk_size=args.mask_chunk_size,
         num_prefetch=args.num_prefetch,
+        use_compile=args.use_compile,
     )
     
     # Save results with config details
