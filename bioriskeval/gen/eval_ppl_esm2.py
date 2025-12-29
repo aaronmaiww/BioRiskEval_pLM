@@ -4,10 +4,11 @@ import argparse
 import contextlib
 import torch
 from Bio import SeqIO
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import time
 import numpy as np
 import gc
+from concurrent.futures import ThreadPoolExecutor
 
 from transformers import AutoTokenizer, EsmForMaskedLM
 import torch.nn.functional as F
@@ -48,6 +49,62 @@ def cleanup_gpu_memory():
         torch.cuda.empty_cache()
         gc.collect()
 
+def prepare_batch_tensors(
+    sequences: List[str],
+    tokenizer,
+    max_seq_len: int,
+    device,
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], 
+           Optional[torch.Tensor], Optional[torch.Tensor], int]:
+    """
+    Prepare all tensors for a batch on CPU with pinned memory for fast GPU transfer.
+    Returns: (expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size)
+    """
+    # Tokenize on CPU
+    inputs = tokenizer(sequences, return_tensors="pt", padding=True, truncation=True, 
+                      max_length=max_seq_len)
+    input_ids = inputs['input_ids']
+    attention_mask = inputs['attention_mask']
+    
+    batch_size = input_ids.size(0)
+    seq_lengths = attention_mask.sum(dim=1)
+    positions_per_seq = (seq_lengths - 2).clamp(min=0).long()
+    total_positions = int(positions_per_seq.sum().item())
+    
+    if total_positions == 0:
+        return None, None, None, None, None, batch_size
+    
+    # Build expanded tensors on CPU with pinned memory
+    expanded_input_ids = input_ids.repeat_interleave(positions_per_seq, dim=0)
+    expanded_attention = attention_mask.repeat_interleave(positions_per_seq, dim=0)
+    
+    # Pin memory for faster GPU transfer
+    if device.type == 'cuda':
+        expanded_input_ids = expanded_input_ids.pin_memory()
+        expanded_attention = expanded_attention.pin_memory()
+    
+    # Build position and target tensors on CPU
+    position_tensors = [
+        torch.arange(1, int(length.item()) - 1) if int(length.item()) > 1
+        else torch.tensor([], dtype=torch.long)
+        for length in seq_lengths
+    ]
+    positions_flat = torch.cat(position_tensors)
+    
+    # Create seq_indices on CPU
+    seq_indices = torch.arange(batch_size).repeat_interleave(positions_per_seq)
+    
+    # Get target tokens
+    token_targets_flat = input_ids.repeat_interleave(positions_per_seq, dim=0)[
+        torch.arange(total_positions), positions_flat
+    ]
+    
+    # Apply mask
+    mask_id = tokenizer.mask_token_id
+    expanded_input_ids[torch.arange(total_positions), positions_flat] = mask_id
+    
+    return expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size
+
 def compute_pseudo_ppl_hf_batch(
     sequences: List[str],
     model,
@@ -57,9 +114,10 @@ def compute_pseudo_ppl_hf_batch(
     max_seq_len: int = 1024,
     mask_chunk_size: int = 512,
     use_fp16: bool = True,
+    num_prefetch: int = 2,
 ) -> List[float]:
     """
-    Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching.
+    Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching and prefetching.
     
     Args:
         sequences: List of protein sequences
@@ -68,6 +126,7 @@ def compute_pseudo_ppl_hf_batch(
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
         max_batch_size: Maximum batch size for processing
         max_seq_len: Maximum sequence length
+        num_prefetch: Number of batches to prefetch in background (default 2)
     Returns:
         List of perplexity scores
     """
@@ -106,6 +165,7 @@ def compute_pseudo_ppl_hf_batch(
             device,
             mask_chunk_size,
             use_fp16,
+            num_prefetch,
         )
         scores.extend(group_scores)
     
@@ -121,84 +181,122 @@ def process_sequence_group_batch(
     device,
     mask_chunk_size: int,
     use_fp16: bool,
+    num_prefetch: int = 2,
 ) -> List[float]:
-    """Process a group of similar-length sequences in batches."""
+    """
+    Process a group of similar-length sequences in batches with prefetching.
+    Prefetch next batches in background to avoid GPU idle time.
+    """
     scores = []
     
+    # Split into batches
+    batches = []
     for i in range(0, len(sequences), max_batch_size):
-        batch_seqs = sequences[i:i + max_batch_size]
-        batch_scores = compute_batch_pseudo_ppl(
-            batch_seqs,
-            model,
-            tokenizer,
-            aggregate,
-            max_seq_len,
-            device,
-            mask_chunk_size,
-            use_fp16,
-        )
-        scores.extend(batch_scores)
+        batches.append(sequences[i:i + max_batch_size])
+    
+    if not batches:
+        return scores
+    
+    # Use ThreadPoolExecutor for prefetching batch preparation
+    with ThreadPoolExecutor(max_workers=num_prefetch) as executor:
+        # Submit first num_prefetch batches
+        future_to_idx = {}
+        for idx in range(min(num_prefetch, len(batches))):
+            future = executor.submit(
+                prepare_batch_tensors,
+                batches[idx],
+                tokenizer,
+                max_seq_len,
+                device,
+            )
+            future_to_idx[future] = idx
         
-        # Clear GPU cache periodically
-        if i % (max_batch_size * 4) == 0:
-            cleanup_gpu_memory()
-            if i > 0:  # Don't print on first iteration
-                print_gpu_memory_info(f"after batch {i//max_batch_size}")
+        next_submit_idx = num_prefetch
+        
+        # Process batches as they become ready
+        for batch_idx in range(len(batches)):
+            # Wait for current batch to be prepared
+            current_future = None
+            for future, idx in list(future_to_idx.items()):
+                if idx == batch_idx:
+                    current_future = future
+                    break
+            
+            if current_future is None:
+                # Fallback: prepare synchronously if not found
+                tensors = prepare_batch_tensors(batches[batch_idx], tokenizer, max_seq_len, device)
+            else:
+                tensors = current_future.result()
+                del future_to_idx[current_future]
+            
+            # Submit next batch while GPU processes current
+            if next_submit_idx < len(batches):
+                future = executor.submit(
+                    prepare_batch_tensors,
+                    batches[next_submit_idx],
+                    tokenizer,
+                    max_seq_len,
+                    device,
+                )
+                future_to_idx[future] = next_submit_idx
+                next_submit_idx += 1
+            
+            # Process on GPU
+            expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size = tensors
+            
+            if expanded_input_ids is None:
+                # Empty batch
+                scores.extend([float("nan")] * batch_size)
+                continue
+            
+            batch_scores = compute_batch_pseudo_ppl_from_tensors(
+                expanded_input_ids,
+                expanded_attention,
+                positions_flat,
+                token_targets_flat,
+                seq_indices,
+                batch_size,
+                model,
+                aggregate,
+                device,
+                mask_chunk_size,
+                use_fp16,
+            )
+            scores.extend(batch_scores)
+            
+            # Clear GPU cache periodically
+            if batch_idx % 4 == 0 and batch_idx > 0:
+                cleanup_gpu_memory()
+                print_gpu_memory_info(f"after batch {batch_idx}")
     
     return scores
 
-def compute_batch_pseudo_ppl(
-    sequences: List[str],
+def compute_batch_pseudo_ppl_from_tensors(
+    expanded_input_ids: torch.Tensor,
+    expanded_attention: torch.Tensor,
+    positions_flat: torch.Tensor,
+    token_targets_flat: torch.Tensor,
+    seq_indices: torch.Tensor,
+    batch_size: int,
     model,
-    tokenizer,
     aggregate: str,
-    max_seq_len: int,
     device,
     mask_chunk_size: int,
     use_fp16: bool,
 ) -> List[float]:
     """
-    Compute pseudo-perplexity for a batch of sequences efficiently by masking
-    every token position across the entire batch and evaluating in chunks.
+    Compute pseudo-perplexity from pre-prepared tensors.
+    This function only does GPU compute, allowing CPU preparation to happen in parallel.
     """
-    if not sequences:
-        return []
+    # Move tensors to GPU with non_blocking for overlap
+    expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
+    expanded_attention = expanded_attention.to(device, non_blocking=True)
+    positions_flat = positions_flat.to(device, non_blocking=True)
+    token_targets_flat = token_targets_flat.to(device, non_blocking=True)
+    seq_indices = seq_indices.to(device, non_blocking=True)
     
-    # Tokenize all sequences in the batch
-    inputs = tokenizer(sequences, return_tensors="pt", padding=True, truncation=True, 
-                      max_length=max_seq_len)
-    input_ids = inputs['input_ids'].to(device)
-    attention_mask = inputs['attention_mask'].to(device)
+    total_positions = expanded_input_ids.size(0)
     
-    batch_size = input_ids.size(0)
-    seq_lengths = attention_mask.sum(dim=1)
-    positions_per_seq = (seq_lengths - 2).clamp(min=0).long()  # exclude special tokens
-    total_positions = int(positions_per_seq.sum().item())
-
-    # Fast path for very short sequences
-    if total_positions == 0:
-        return [float("nan")] * batch_size
-
-    # Build expanded tensors that contain one masked example per token position
-    expanded_input_ids = input_ids.repeat_interleave(positions_per_seq, dim=0)
-    expanded_attention = attention_mask.repeat_interleave(positions_per_seq, dim=0)
-    seq_indices = torch.arange(batch_size, device=device).repeat_interleave(positions_per_seq)
-
-    # Build flat position and target token tensors
-    position_tensors = [
-        torch.arange(1, int(length.item()) - 1, device=device) if int(length.item()) > 1
-        else torch.tensor([], device=device, dtype=torch.long)
-        for length in seq_lengths
-    ]
-    positions_flat = torch.cat(position_tensors)
-    token_targets_flat = input_ids.repeat_interleave(positions_per_seq, dim=0)[
-        torch.arange(total_positions, device=device), positions_flat
-    ]
-
-    # Apply mask token to the positions we will score
-    mask_id = tokenizer.mask_token_id
-    expanded_input_ids[torch.arange(total_positions, device=device), positions_flat] = mask_id
-
     log_sums = torch.zeros(batch_size, device=device)
     counts = torch.zeros(batch_size, device=device)
 
@@ -251,13 +349,15 @@ def compute_pseudo_ppl_hf(
     aggregate: str = "mean",
     mask_chunk_size: int = 512,
     use_fp16: bool = True,
+    num_prefetch: int = 2,
 ) -> List[float]:
     """
     Legacy function - redirects to optimized batch version.
     """
     return compute_pseudo_ppl_hf_batch(sequences, model, tokenizer, aggregate, 
                                      max_batch_size=16, max_seq_len=1024,
-                                     mask_chunk_size=mask_chunk_size, use_fp16=use_fp16)
+                                     mask_chunk_size=mask_chunk_size, use_fp16=use_fp16,
+                                     num_prefetch=num_prefetch)
 
 def generate_fasta_path(tier: str) -> str:
     """
@@ -409,7 +509,8 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
                   batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
-                  max_seq_len: int = 1024, use_fp16: bool = True, mask_chunk_size: int = 512) -> Dict[str, float]:
+                  max_seq_len: int = 1024, use_fp16: bool = True, mask_chunk_size: int = 512,
+                  num_prefetch: int = 2) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -419,6 +520,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         batch_size (int): Batch size for processing sequences.
         aggregate (str): "sum" for total log-likelihood, "mean" for average log-likelihood
         mask_chunk_size (int): Number of masked positions evaluated per forward.
+        num_prefetch (int): Number of batches to prefetch in background (default 2).
     Returns:
         dict: A dictionary mapping sequence IDs to their perplexity scores.
     """
@@ -477,7 +579,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
 
     # Use optimized batch processing
     print(f"Processing {len(sequences)} sequences with batch size {batch_size}")
-    print(f"Using optimized GPU batch processing...")
+    print("Using optimized GPU batch processing with prefetching...")
     
     batch_start_time = time.time()
     
@@ -485,7 +587,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     cleanup_gpu_memory()
     print_gpu_memory_info("before processing")
     
-    # Compute all scores using optimized batch processing
+    # Compute all scores using optimized batch processing with prefetching
     batch_scores = compute_pseudo_ppl_hf_batch(
         sequences,
         model,
@@ -495,6 +597,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         max_seq_len=max_seq_len,
         mask_chunk_size=mask_chunk_size,
         use_fp16=use_fp16,
+        num_prefetch=num_prefetch,
     )
     
     batch_time = time.time() - batch_start_time
@@ -612,6 +715,12 @@ def main():
         help="Use FP16 precision for better memory efficiency.",
     )
     parser.add_argument(
+        "--num-prefetch",
+        type=int,
+        default=4,
+        help="Number of batches to prefetch in background (default 2). Increase for better GPU utilization.",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -640,6 +749,7 @@ def main():
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
             "use_fp16": args.use_fp16,
+            "num_prefetch": args.num_prefetch,
             "aggregation": args.aggregate,
             "fasta_path": fasta_path,
             "output_path": output_path,
@@ -655,6 +765,7 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print(f"Max sequence length: {args.max_seq_len}")
     print(f"Mask chunk size: {args.mask_chunk_size}")
+    print(f"Prefetch batches: {args.num_prefetch}")
     print(f"Use FP16: {args.use_fp16}")
     print(f"Aggregation method: {args.aggregate}")
 
@@ -667,6 +778,7 @@ def main():
         max_seq_len=args.max_seq_len,
         use_fp16=args.use_fp16,
         mask_chunk_size=args.mask_chunk_size,
+        num_prefetch=args.num_prefetch,
     )
     
     # Save results with config details
