@@ -4,9 +4,13 @@ import argparse
 import torch
 from Bio import SeqIO
 from typing import List, Dict, Optional
+import time
+import numpy as np
 
 from transformers import AutoTokenizer, EsmForMaskedLM
 import torch.nn.functional as F
+import wandb
+from tqdm import tqdm
 
 MODELS = [
     # 8M
@@ -42,7 +46,7 @@ def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str
     model = model.to(device)
     scores = []
     
-    for seq in sequences:
+    for seq in tqdm(sequences, desc="Computing perplexity", leave=False):
         # Tokenize sequence
         inputs = tokenizer(seq, return_tensors="pt", truncation=True, max_length=1024)
         input_ids = inputs['input_ids'].to(device)
@@ -245,22 +249,54 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     Returns:
         dict: A dictionary mapping sequence IDs to their perplexity scores.
     """
+    start_time = time.time()
+    
     # Load ESM2 model using HuggingFace
+    print("Loading model...")
+    model_load_start = time.time()
     model, tokenizer = load_esm2_model(ckpt_path=ckpt_path, custom_weights_path=custom_weights_path)
+    model_load_time = time.time() - model_load_start
     
     # Load sequences from FASTA file
+    print("Loading sequences...")
     sequences, seq_ids = load_sequences_from_fasta(fasta_path)
+    
+    # Calculate sequence statistics
+    seq_lengths = [len(seq) for seq in sequences]
+    seq_stats = {
+        "total_sequences": len(sequences),
+        "min_length": min(seq_lengths) if seq_lengths else 0,
+        "max_length": max(seq_lengths) if seq_lengths else 0,
+        "mean_length": np.mean(seq_lengths) if seq_lengths else 0,
+        "median_length": np.median(seq_lengths) if seq_lengths else 0,
+    }
+    
+    # Log sequence statistics to wandb
+    wandb.log({
+        "model_load_time": model_load_time,
+        "sequence_stats/total_sequences": seq_stats["total_sequences"],
+        "sequence_stats/min_length": seq_stats["min_length"],
+        "sequence_stats/max_length": seq_stats["max_length"],
+        "sequence_stats/mean_length": seq_stats["mean_length"],
+        "sequence_stats/median_length": seq_stats["median_length"],
+    })
 
     results = {}
+    all_perplexities = []
+    processing_times = []
 
     # Process sequences in batches
-    for i in range(0, len(sequences), batch_size):
+    num_batches = (len(sequences) + batch_size - 1) // batch_size
+    
+    for i in tqdm(range(0, len(sequences), batch_size), desc="Processing batches", total=num_batches):
+        batch_start_time = time.time()
         batch_seqs = sequences[i : i + batch_size]
         batch_ids = seq_ids[i : i + batch_size]
 
         # Compute pseudo-perplexity scores (log-likelihoods)
         batch_scores = compute_pseudo_ppl_hf(batch_seqs, model, tokenizer, aggregate=aggregate)
-
+        
+        batch_perplexities = []
         for seq_id, score in zip(batch_ids, batch_scores):
             # Convert log-likelihood to perplexity: exp(-log_likelihood)
             if not torch.isnan(torch.tensor(score)):
@@ -268,7 +304,50 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
             else:
                 perplexity = float("nan")
             results[seq_id] = perplexity
-            print(f"Sequence ID: {seq_id}, Score: {score:.4f}, Perplexity: {perplexity:.4f}")
+            
+            if not np.isnan(perplexity):
+                batch_perplexities.append(perplexity)
+                all_perplexities.append(perplexity)
+        
+        batch_time = time.time() - batch_start_time
+        processing_times.append(batch_time)
+        
+        # Log batch metrics
+        if batch_perplexities:
+            wandb.log({
+                "batch_metrics/batch_idx": i // batch_size,
+                "batch_metrics/batch_size": len(batch_seqs),
+                "batch_metrics/batch_time": batch_time,
+                "batch_metrics/sequences_per_second": len(batch_seqs) / batch_time,
+                "batch_metrics/mean_perplexity": np.mean(batch_perplexities),
+                "batch_metrics/median_perplexity": np.median(batch_perplexities),
+            })
+
+    # Calculate final statistics
+    total_time = time.time() - start_time
+    
+    if all_perplexities:
+        final_stats = {
+            "final_metrics/total_time": total_time,
+            "final_metrics/mean_batch_time": np.mean(processing_times),
+            "final_metrics/total_sequences_processed": len(results),
+            "final_metrics/sequences_per_second": len(results) / total_time,
+            "final_metrics/mean_perplexity": np.mean(all_perplexities),
+            "final_metrics/median_perplexity": np.median(all_perplexities),
+            "final_metrics/std_perplexity": np.std(all_perplexities),
+            "final_metrics/min_perplexity": np.min(all_perplexities),
+            "final_metrics/max_perplexity": np.max(all_perplexities),
+            "final_metrics/valid_sequences": len(all_perplexities),
+            "final_metrics/invalid_sequences": len(results) - len(all_perplexities),
+        }
+        
+        # Log final metrics
+        wandb.log(final_stats)
+        
+        print(f"\nEvaluation completed in {total_time:.2f}s")
+        print(f"Processed {len(results)} sequences ({len(all_perplexities)} valid)")
+        print(f"Mean perplexity: {np.mean(all_perplexities):.4f}")
+        print(f"Median perplexity: {np.median(all_perplexities):.4f}")
 
     return results
 
@@ -305,7 +384,7 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8,
+        default=256,
         help="Batch size for processing sequences.",
     )
     parser.add_argument(
@@ -325,6 +404,22 @@ def main():
         output_path = generate_output_filename(args.ckpt_path, args.tier)
     else:
         output_path = args.output
+
+    # Initialize wandb
+    wandb.init(
+        project="esm2-gen-eval",
+        config={
+            "model_ckpt": args.ckpt_path,
+            "eval_tier": args.tier,
+            "custom_weights": args.custom_weights,
+            "batch_size": args.batch_size,
+            "aggregation": args.aggregate,
+            "fasta_path": fasta_path,
+            "output_path": output_path,
+        },
+        tags=[f"tier_{args.tier}", 
+              parse_model_size(args.ckpt_path) if any(size in args.ckpt_path for size in ["8M", "35M", "150M"]) else "unknown_size"]
+    )
 
     print(f"Evaluating perplexity using ESM2 model: {args.ckpt_path}")
     print(f"Tier: {args.tier}")
@@ -371,6 +466,15 @@ def main():
     
     print(f"Perplexity results saved to {output_path}")
     print(f"Processed {len(results)} sequences.")
+    
+    # Log final output file info to wandb
+    wandb.log({
+        "output_file": output_path,
+        "total_results": len(results)
+    })
+    
+    # Finish wandb run
+    wandb.finish()
     
 
 if __name__ == "__main__":
