@@ -828,9 +828,14 @@ def main():
     else:
         output_path = args.output
 
+    # Generate wandb run name: {model_ckpt}_eval_on_{eval_tier}
+    model_name_clean = args.ckpt_path.replace("/", "_")
+    wandb_run_name = f"{model_name_clean}_eval_on_{args.tier}"
+
     # Initialize wandb
     wandb.init(
         project="esm2-gen-eval",
+        name=wandb_run_name,
         config={
             "model_ckpt": args.ckpt_path,
             "eval_tier": args.tier,
