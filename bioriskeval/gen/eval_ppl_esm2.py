@@ -6,6 +6,7 @@ from Bio import SeqIO
 from typing import List, Dict, Optional
 import time
 import numpy as np
+import gc
 
 from transformers import AutoTokenizer, EsmForMaskedLM
 import torch.nn.functional as F
@@ -30,63 +31,180 @@ FACEBOOK_CONFIG = {
     "150M": "facebook/esm2_t30_150M_UR50D",
 }
 
-def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str = "mean") -> List[float]:
+def print_gpu_memory_info(stage: str = ""):
+    """Print current GPU memory usage."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+        print(f"GPU Memory {stage}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB, Peak={max_allocated:.2f}GB")
+        return allocated, reserved, max_allocated
+    return 0, 0, 0
+
+def cleanup_gpu_memory():
+    """Clean up GPU memory."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+
+def compute_pseudo_ppl_hf_batch(sequences: List[str], model, tokenizer, aggregate: str = "mean", 
+                               max_batch_size: int = 32, max_seq_len: int = 1024) -> List[float]:
     """
-    Compute pseudo-perplexity for sequences using HuggingFace ESM2 model.
+    Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching.
     
     Args:
         sequences: List of protein sequences
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
+        max_batch_size: Maximum batch size for processing
+        max_seq_len: Maximum sequence length
     Returns:
         List of perplexity scores
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
+    device = next(model.parameters()).device
     scores = []
     
-    for seq in tqdm(sequences, desc="Computing perplexity", leave=False):
-        # Tokenize sequence
-        inputs = tokenizer(seq, return_tensors="pt", truncation=True, max_length=1024)
-        input_ids = inputs['input_ids'].to(device)
-        attention_mask = inputs['attention_mask'].to(device)
+    # Group sequences by similar lengths for efficient batching
+    seq_groups = []
+    current_group = []
+    current_length = 0
+    
+    for seq in sequences:
+        seq_len = min(len(seq) + 2, max_seq_len)  # +2 for special tokens
+        if not current_group or abs(seq_len - current_length) <= 50:  # Allow 50 token difference
+            current_group.append(seq)
+            current_length = seq_len
+        else:
+            if current_group:
+                seq_groups.append(current_group)
+            current_group = [seq]
+            current_length = seq_len
+    
+    if current_group:
+        seq_groups.append(current_group)
+    
+    print(f"Processing {len(sequences)} sequences in {len(seq_groups)} length-grouped batches")
+    
+    for group in tqdm(seq_groups, desc="Processing sequence groups"):
+        group_scores = process_sequence_group_batch(group, model, tokenizer, aggregate, 
+                                                  max_batch_size, max_seq_len, device)
+        scores.extend(group_scores)
+    
+    return scores
+
+def process_sequence_group_batch(sequences: List[str], model, tokenizer, aggregate: str,
+                               max_batch_size: int, max_seq_len: int, device) -> List[float]:
+    """Process a group of similar-length sequences in batches."""
+    scores = []
+    
+    for i in range(0, len(sequences), max_batch_size):
+        batch_seqs = sequences[i:i + max_batch_size]
+        batch_scores = compute_batch_pseudo_ppl(batch_seqs, model, tokenizer, aggregate, 
+                                              max_seq_len, device)
+        scores.extend(batch_scores)
         
-        seq_len = input_ids.size(1)
-        if seq_len <= 2:  # Skip very short sequences
+        # Clear GPU cache periodically
+        if i % (max_batch_size * 4) == 0:
+            cleanup_gpu_memory()
+            if i > 0:  # Don't print on first iteration
+                print_gpu_memory_info(f"after batch {i//max_batch_size}")
+    
+    return scores
+
+def compute_batch_pseudo_ppl(sequences: List[str], model, tokenizer, aggregate: str,
+                           max_seq_len: int, device) -> List[float]:
+    """Compute pseudo-perplexity for a batch of sequences efficiently."""
+    if not sequences:
+        return []
+    
+    # Tokenize all sequences in the batch
+    inputs = tokenizer(sequences, return_tensors="pt", padding=True, truncation=True, 
+                      max_length=max_seq_len)
+    input_ids = inputs['input_ids'].to(device)
+    attention_mask = inputs['attention_mask'].to(device)
+    
+    batch_size, seq_len = input_ids.shape
+    scores = []
+    
+    # Process each sequence in the batch
+    for seq_idx in range(batch_size):
+        seq_input_ids = input_ids[seq_idx:seq_idx+1]  # Keep batch dimension
+        seq_attention_mask = attention_mask[seq_idx:seq_idx+1]
+        
+        # Find actual sequence length (excluding padding)
+        actual_len = seq_attention_mask.sum().item()
+        
+        if actual_len <= 2:  # Skip very short sequences
             scores.append(float("nan"))
             continue
-            
-        # Mask each position (except special tokens) and compute log-likelihood
-        log_likelihoods = []
         
-        for pos in range(1, seq_len - 1):  # Skip [CLS] and [SEP] tokens
-            # Create masked input
-            masked_input = input_ids.clone()
-            masked_input[0, pos] = tokenizer.mask_token_id
-            
-            # Get model prediction
-            with torch.no_grad():
-                outputs = model(masked_input, attention_mask=attention_mask)
-                logits = outputs.logits  # [1, seq_len, vocab_size]
-                
-                # Get log probabilities for the masked position
-                log_probs = F.log_softmax(logits[0, pos], dim=-1)
-                true_token = input_ids[0, pos]
-                log_likelihood = log_probs[true_token].item()
-                log_likelihoods.append(log_likelihood)
+        # Compute log-likelihood for each position using vectorized operations
+        log_likelihoods = compute_position_likelihoods_vectorized(
+            seq_input_ids, seq_attention_mask, model, tokenizer, actual_len
+        )
         
         # Aggregate log likelihoods
-        if aggregate == "sum":
-            score = sum(log_likelihoods)
-        elif aggregate == "mean":
-            score = sum(log_likelihoods) / len(log_likelihoods) if log_likelihoods else float("nan")
+        if log_likelihoods:
+            if aggregate == "sum":
+                score = sum(log_likelihoods)
+            elif aggregate == "mean":
+                score = sum(log_likelihoods) / len(log_likelihoods)
+            else:
+                raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
         else:
-            raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
+            score = float("nan")
             
         scores.append(score)
     
     return scores
+
+def compute_position_likelihoods_vectorized(input_ids, attention_mask, model, tokenizer, 
+                                          actual_len: int) -> List[float]:
+    """Compute log-likelihoods for all positions using vectorized operations."""
+    positions_to_mask = list(range(1, min(actual_len - 1, input_ids.size(1) - 1)))  # Skip [CLS] and [SEP]
+    
+    if not positions_to_mask:
+        return []
+    
+    # Create batch of masked inputs for all positions at once
+    num_positions = len(positions_to_mask)
+    batch_masked_inputs = input_ids.repeat(num_positions, 1)  # [num_positions, seq_len]
+    batch_attention_masks = attention_mask.repeat(num_positions, 1)
+    
+    # Mask each position
+    for i, pos in enumerate(positions_to_mask):
+        batch_masked_inputs[i, pos] = tokenizer.mask_token_id
+    
+    log_likelihoods = []
+    
+    # Process in smaller chunks to manage memory
+    chunk_size = min(32, num_positions)  # Process up to 32 positions at once
+    
+    for chunk_start in range(0, num_positions, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, num_positions)
+        chunk_masked_inputs = batch_masked_inputs[chunk_start:chunk_end]
+        chunk_attention_masks = batch_attention_masks[chunk_start:chunk_end]
+        
+        with torch.no_grad():
+            outputs = model(chunk_masked_inputs, attention_mask=chunk_attention_masks)
+            logits = outputs.logits  # [chunk_size, seq_len, vocab_size]
+            
+            # Get log probabilities for masked positions
+            for i, pos in enumerate(positions_to_mask[chunk_start:chunk_end]):
+                log_probs = F.log_softmax(logits[i, pos], dim=-1)
+                true_token = input_ids[0, pos]
+                log_likelihood = log_probs[true_token].item()
+                log_likelihoods.append(log_likelihood)
+    
+    return log_likelihoods
+
+def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str = "mean") -> List[float]:
+    """
+    Legacy function - redirects to optimized batch version.
+    """
+    return compute_pseudo_ppl_hf_batch(sequences, model, tokenizer, aggregate, 
+                                     max_batch_size=16, max_seq_len=1024)
 
 def generate_fasta_path(tier: str) -> str:
     """
@@ -237,7 +355,8 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
-                  batch_size: int = 32, aggregate: str = "mean", custom_weights_path: Optional[str] = None) -> Dict[str, float]:
+                  batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
+                  max_seq_len: int = 1024, use_fp16: bool = True) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -255,6 +374,21 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     print("Loading model...")
     model_load_start = time.time()
     model, tokenizer = load_esm2_model(ckpt_path=ckpt_path, custom_weights_path=custom_weights_path)
+    
+    # Move model to GPU and optimize
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    
+    # Enable mixed precision and optimizations
+    if torch.cuda.is_available():
+        if use_fp16:
+            model = model.half()  # Use FP16 for better memory efficiency
+            print(f"Model loaded on {device} with FP16 precision")
+        else:
+            print(f"Model loaded on {device} with FP32 precision")
+        torch.backends.cudnn.benchmark = True
+        print_gpu_memory_info("after model loading")
+    
     model_load_time = time.time() - model_load_start
     
     # Load sequences from FASTA file
@@ -285,43 +419,53 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     all_perplexities = []
     processing_times = []
 
-    # Process sequences in batches
-    num_batches = (len(sequences) + batch_size - 1) // batch_size
+    # Use optimized batch processing
+    print(f"Processing {len(sequences)} sequences with batch size {batch_size}")
+    print(f"Using optimized GPU batch processing...")
     
-    for i in tqdm(range(0, len(sequences), batch_size), desc="Processing batches", total=num_batches):
-        batch_start_time = time.time()
-        batch_seqs = sequences[i : i + batch_size]
-        batch_ids = seq_ids[i : i + batch_size]
-
-        # Compute pseudo-perplexity scores (log-likelihoods)
-        batch_scores = compute_pseudo_ppl_hf(batch_seqs, model, tokenizer, aggregate=aggregate)
+    batch_start_time = time.time()
+    
+    # Monitor GPU memory before processing
+    cleanup_gpu_memory()
+    print_gpu_memory_info("before processing")
+    
+    # Compute all scores using optimized batch processing
+    batch_scores = compute_pseudo_ppl_hf_batch(
+        sequences, model, tokenizer, aggregate=aggregate, 
+        max_batch_size=batch_size, max_seq_len=max_seq_len
+    )
+    
+    batch_time = time.time() - batch_start_time
+    processing_times.append(batch_time)
+    
+    # Convert scores to perplexities and store results
+    batch_perplexities = []
+    for seq_id, score in zip(seq_ids, batch_scores):
+        # Convert log-likelihood to perplexity: exp(-log_likelihood)
+        if not torch.isnan(torch.tensor(score)):
+            perplexity = torch.exp(-torch.tensor(score)).item() 
+        else:
+            perplexity = float("nan")
+        results[seq_id] = perplexity
         
-        batch_perplexities = []
-        for seq_id, score in zip(batch_ids, batch_scores):
-            # Convert log-likelihood to perplexity: exp(-log_likelihood)
-            if not torch.isnan(torch.tensor(score)):
-                perplexity = torch.exp(-torch.tensor(score)).item() 
-            else:
-                perplexity = float("nan")
-            results[seq_id] = perplexity
-            
-            if not np.isnan(perplexity):
-                batch_perplexities.append(perplexity)
-                all_perplexities.append(perplexity)
-        
-        batch_time = time.time() - batch_start_time
-        processing_times.append(batch_time)
-        
-        # Log batch metrics
-        if batch_perplexities:
-            wandb.log({
-                "batch_metrics/batch_idx": i // batch_size,
-                "batch_metrics/batch_size": len(batch_seqs),
-                "batch_metrics/batch_time": batch_time,
-                "batch_metrics/sequences_per_second": len(batch_seqs) / batch_time,
-                "batch_metrics/mean_perplexity": np.mean(batch_perplexities),
-                "batch_metrics/median_perplexity": np.median(batch_perplexities),
-            })
+        if not np.isnan(perplexity):
+            batch_perplexities.append(perplexity)
+            all_perplexities.append(perplexity)
+    
+    # Monitor GPU memory after processing
+    allocated, reserved, peak = print_gpu_memory_info("after processing")
+    
+    # Log batch metrics
+    if batch_perplexities:
+        wandb.log({
+            "batch_metrics/total_batch_time": batch_time,
+            "batch_metrics/sequences_per_second": len(sequences) / batch_time,
+            "batch_metrics/mean_perplexity": np.mean(batch_perplexities),
+            "batch_metrics/median_perplexity": np.median(batch_perplexities),
+            "batch_metrics/gpu_memory_peak_gb": peak,
+            "batch_metrics/gpu_memory_allocated_gb": allocated,
+            "batch_metrics/gpu_memory_reserved_gb": reserved,
+        })
 
     # Calculate final statistics
     total_time = time.time() - start_time
@@ -385,7 +529,19 @@ def main():
         "--batch-size",
         type=int,
         default=256,
-        help="Batch size for processing sequences.",
+        help="Batch size for processing sequences. Larger values use more GPU memory but are faster. Try 512-1024 for 32GB GPU.",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=1024,
+        help="Maximum sequence length for tokenization.",
+    )
+    parser.add_argument(
+        "--use-fp16",
+        action="store_true",
+        default=False,
+        help="Use FP16 precision for better memory efficiency.",
     )
     parser.add_argument(
         "--output",
@@ -413,6 +569,8 @@ def main():
             "eval_tier": args.tier,
             "custom_weights": args.custom_weights,
             "batch_size": args.batch_size,
+            "max_seq_len": args.max_seq_len,
+            "use_fp16": args.use_fp16,
             "aggregation": args.aggregate,
             "fasta_path": fasta_path,
             "output_path": output_path,
@@ -426,6 +584,8 @@ def main():
     print(f"Input FASTA: {fasta_path}")
     print(f"Output file: {output_path}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Max sequence length: {args.max_seq_len}")
+    print(f"Use FP16: {args.use_fp16}")
     print(f"Aggregation method: {args.aggregate}")
 
     results = eval_ppl_esm2(
@@ -433,7 +593,9 @@ def main():
         ckpt_path=args.ckpt_path,
         batch_size=args.batch_size,
         aggregate=args.aggregate,
-        custom_weights_path=args.custom_weights
+        custom_weights_path=args.custom_weights,
+        max_seq_len=args.max_seq_len,
+        use_fp16=args.use_fp16
     )
     
     # Save results with config details
