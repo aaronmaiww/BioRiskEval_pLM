@@ -329,6 +329,10 @@ def compute_batch_pseudo_ppl_from_tensors(
         chunk_seq_indices = seq_indices[chunk_start:chunk_end]
         chunk_batch = chunk_inputs.size(0)
 
+        # Mark step for CUDA graph compatibility with torch.compile
+        if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+            torch.compiler.cudagraph_mark_step_begin()
+
         with torch.inference_mode(), autocast_context:
             logits = model(chunk_inputs, attention_mask=chunk_attention).logits
             log_probs = F.log_softmax(logits.float(), dim=-1)
@@ -624,7 +628,9 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     if use_compile and hasattr(torch, 'compile'):
         print("Compiling model with torch.compile()...")
         compile_start = time.time()
-        model = torch.compile(model, mode="reduce-overhead", fullgraph=False)
+        # Use mode="default" instead of "reduce-overhead" to avoid CUDA Graph issues
+        # with ESM's rotary embeddings which have dynamic cached tensors
+        model = torch.compile(model, mode="default", fullgraph=False, dynamic=True)
         print(f"Model compiled in {time.time() - compile_start:.2f}s")
     
     model_load_time = time.time() - model_load_start
