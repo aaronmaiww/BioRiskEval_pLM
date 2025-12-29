@@ -1,6 +1,7 @@
 # goal get esm2-ppl for fasta sequences 
 
 import argparse
+import contextlib
 import torch
 from Bio import SeqIO
 from typing import List, Dict, Optional
@@ -47,8 +48,16 @@ def cleanup_gpu_memory():
         torch.cuda.empty_cache()
         gc.collect()
 
-def compute_pseudo_ppl_hf_batch(sequences: List[str], model, tokenizer, aggregate: str = "mean", 
-                               max_batch_size: int = 32, max_seq_len: int = 1024) -> List[float]:
+def compute_pseudo_ppl_hf_batch(
+    sequences: List[str],
+    model,
+    tokenizer,
+    aggregate: str = "mean",
+    max_batch_size: int = 32,
+    max_seq_len: int = 1024,
+    mask_chunk_size: int = 512,
+    use_fp16: bool = True,
+) -> List[float]:
     """
     Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching.
     
@@ -87,21 +96,47 @@ def compute_pseudo_ppl_hf_batch(sequences: List[str], model, tokenizer, aggregat
     print(f"Processing {len(sequences)} sequences in {len(seq_groups)} length-grouped batches")
     
     for group in tqdm(seq_groups, desc="Processing sequence groups"):
-        group_scores = process_sequence_group_batch(group, model, tokenizer, aggregate, 
-                                                  max_batch_size, max_seq_len, device)
+        group_scores = process_sequence_group_batch(
+            group,
+            model,
+            tokenizer,
+            aggregate,
+            max_batch_size,
+            max_seq_len,
+            device,
+            mask_chunk_size,
+            use_fp16,
+        )
         scores.extend(group_scores)
     
     return scores
 
-def process_sequence_group_batch(sequences: List[str], model, tokenizer, aggregate: str,
-                               max_batch_size: int, max_seq_len: int, device) -> List[float]:
+def process_sequence_group_batch(
+    sequences: List[str],
+    model,
+    tokenizer,
+    aggregate: str,
+    max_batch_size: int,
+    max_seq_len: int,
+    device,
+    mask_chunk_size: int,
+    use_fp16: bool,
+) -> List[float]:
     """Process a group of similar-length sequences in batches."""
     scores = []
     
     for i in range(0, len(sequences), max_batch_size):
         batch_seqs = sequences[i:i + max_batch_size]
-        batch_scores = compute_batch_pseudo_ppl(batch_seqs, model, tokenizer, aggregate, 
-                                              max_seq_len, device)
+        batch_scores = compute_batch_pseudo_ppl(
+            batch_seqs,
+            model,
+            tokenizer,
+            aggregate,
+            max_seq_len,
+            device,
+            mask_chunk_size,
+            use_fp16,
+        )
         scores.extend(batch_scores)
         
         # Clear GPU cache periodically
@@ -112,9 +147,20 @@ def process_sequence_group_batch(sequences: List[str], model, tokenizer, aggrega
     
     return scores
 
-def compute_batch_pseudo_ppl(sequences: List[str], model, tokenizer, aggregate: str,
-                           max_seq_len: int, device) -> List[float]:
-    """Compute pseudo-perplexity for a batch of sequences efficiently."""
+def compute_batch_pseudo_ppl(
+    sequences: List[str],
+    model,
+    tokenizer,
+    aggregate: str,
+    max_seq_len: int,
+    device,
+    mask_chunk_size: int,
+    use_fp16: bool,
+) -> List[float]:
+    """
+    Compute pseudo-perplexity for a batch of sequences efficiently by masking
+    every token position across the entire batch and evaluating in chunks.
+    """
     if not sequences:
         return []
     
@@ -124,87 +170,94 @@ def compute_batch_pseudo_ppl(sequences: List[str], model, tokenizer, aggregate: 
     input_ids = inputs['input_ids'].to(device)
     attention_mask = inputs['attention_mask'].to(device)
     
-    batch_size, seq_len = input_ids.shape
-    scores = []
+    batch_size = input_ids.size(0)
+    seq_lengths = attention_mask.sum(dim=1)
+    positions_per_seq = (seq_lengths - 2).clamp(min=0).long()  # exclude special tokens
+    total_positions = int(positions_per_seq.sum().item())
+
+    # Fast path for very short sequences
+    if total_positions == 0:
+        return [float("nan")] * batch_size
+
+    # Build expanded tensors that contain one masked example per token position
+    expanded_input_ids = input_ids.repeat_interleave(positions_per_seq, dim=0)
+    expanded_attention = attention_mask.repeat_interleave(positions_per_seq, dim=0)
+    seq_indices = torch.arange(batch_size, device=device).repeat_interleave(positions_per_seq)
+
+    # Build flat position and target token tensors
+    position_tensors = [
+        torch.arange(1, int(length.item()) - 1, device=device) if int(length.item()) > 1
+        else torch.tensor([], device=device, dtype=torch.long)
+        for length in seq_lengths
+    ]
+    positions_flat = torch.cat(position_tensors)
+    token_targets_flat = input_ids.repeat_interleave(positions_per_seq, dim=0)[
+        torch.arange(total_positions, device=device), positions_flat
+    ]
+
+    # Apply mask token to the positions we will score
+    mask_id = tokenizer.mask_token_id
+    expanded_input_ids[torch.arange(total_positions, device=device), positions_flat] = mask_id
+
+    log_sums = torch.zeros(batch_size, device=device)
+    counts = torch.zeros(batch_size, device=device)
+
+    autocast_enabled = use_fp16 and device.type == "cuda"
+    autocast_context = torch.cuda.amp.autocast(dtype=torch.float16) if autocast_enabled else contextlib.nullcontext()
+
+    for chunk_start in range(0, total_positions, mask_chunk_size):
+        chunk_end = min(chunk_start + mask_chunk_size, total_positions)
+        chunk_inputs = expanded_input_ids[chunk_start:chunk_end]
+        chunk_attention = expanded_attention[chunk_start:chunk_end]
+        chunk_positions = positions_flat[chunk_start:chunk_end]
+        chunk_targets = token_targets_flat[chunk_start:chunk_end]
+        chunk_seq_indices = seq_indices[chunk_start:chunk_end]
+        chunk_batch = chunk_inputs.size(0)
+
+        with torch.inference_mode(), autocast_context:
+            logits = model(chunk_inputs, attention_mask=chunk_attention).logits
+            log_probs = F.log_softmax(logits.float(), dim=-1)
+            token_log_probs = log_probs[
+                torch.arange(chunk_batch, device=device),
+                chunk_positions,
+                chunk_targets
+            ]
+
+        log_sums.scatter_add_(0, chunk_seq_indices, token_log_probs)
+        counts.scatter_add_(0, chunk_seq_indices, torch.ones_like(token_log_probs))
+
+        if chunk_start % (mask_chunk_size * 8) == 0:
+            cleanup_gpu_memory()
     
-    # Process each sequence in the batch
-    for seq_idx in range(batch_size):
-        seq_input_ids = input_ids[seq_idx:seq_idx+1]  # Keep batch dimension
-        seq_attention_mask = attention_mask[seq_idx:seq_idx+1]
-        
-        # Find actual sequence length (excluding padding)
-        actual_len = seq_attention_mask.sum().item()
-        
-        if actual_len <= 2:  # Skip very short sequences
+    scores = []
+    for idx in range(batch_size):
+        if counts[idx] == 0:
             scores.append(float("nan"))
-            continue
-        
-        # Compute log-likelihood for each position using vectorized operations
-        log_likelihoods = compute_position_likelihoods_vectorized(
-            seq_input_ids, seq_attention_mask, model, tokenizer, actual_len
-        )
-        
-        # Aggregate log likelihoods
-        if log_likelihoods:
+        else:
             if aggregate == "sum":
-                score = sum(log_likelihoods)
+                score = log_sums[idx].item()
             elif aggregate == "mean":
-                score = sum(log_likelihoods) / len(log_likelihoods)
+                score = (log_sums[idx] / counts[idx]).item()
             else:
                 raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
-        else:
-            score = float("nan")
-            
-        scores.append(score)
+            scores.append(score)
     
     return scores
 
-def compute_position_likelihoods_vectorized(input_ids, attention_mask, model, tokenizer, 
-                                          actual_len: int) -> List[float]:
-    """Compute log-likelihoods for all positions using vectorized operations."""
-    positions_to_mask = list(range(1, min(actual_len - 1, input_ids.size(1) - 1)))  # Skip [CLS] and [SEP]
-    
-    if not positions_to_mask:
-        return []
-    
-    # Create batch of masked inputs for all positions at once
-    num_positions = len(positions_to_mask)
-    batch_masked_inputs = input_ids.repeat(num_positions, 1)  # [num_positions, seq_len]
-    batch_attention_masks = attention_mask.repeat(num_positions, 1)
-    
-    # Mask each position
-    for i, pos in enumerate(positions_to_mask):
-        batch_masked_inputs[i, pos] = tokenizer.mask_token_id
-    
-    log_likelihoods = []
-    
-    # Process in smaller chunks to manage memory
-    chunk_size = min(32, num_positions)  # Process up to 32 positions at once
-    
-    for chunk_start in range(0, num_positions, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, num_positions)
-        chunk_masked_inputs = batch_masked_inputs[chunk_start:chunk_end]
-        chunk_attention_masks = batch_attention_masks[chunk_start:chunk_end]
-        
-        with torch.no_grad():
-            outputs = model(chunk_masked_inputs, attention_mask=chunk_attention_masks)
-            logits = outputs.logits  # [chunk_size, seq_len, vocab_size]
-            
-            # Get log probabilities for masked positions
-            for i, pos in enumerate(positions_to_mask[chunk_start:chunk_end]):
-                log_probs = F.log_softmax(logits[i, pos], dim=-1)
-                true_token = input_ids[0, pos]
-                log_likelihood = log_probs[true_token].item()
-                log_likelihoods.append(log_likelihood)
-    
-    return log_likelihoods
-
-def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str = "mean") -> List[float]:
+def compute_pseudo_ppl_hf(
+    sequences: List[str],
+    model,
+    tokenizer,
+    aggregate: str = "mean",
+    mask_chunk_size: int = 512,
+    use_fp16: bool = True,
+) -> List[float]:
     """
     Legacy function - redirects to optimized batch version.
     """
     return compute_pseudo_ppl_hf_batch(sequences, model, tokenizer, aggregate, 
-                                     max_batch_size=16, max_seq_len=1024)
+                                     max_batch_size=16, max_seq_len=1024,
+                                     mask_chunk_size=mask_chunk_size, use_fp16=use_fp16)
 
 def generate_fasta_path(tier: str) -> str:
     """
@@ -356,7 +409,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
                   batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
-                  max_seq_len: int = 1024, use_fp16: bool = True) -> Dict[str, float]:
+                  max_seq_len: int = 1024, use_fp16: bool = True, mask_chunk_size: int = 512) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -365,6 +418,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         ckpt_path (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D")
         batch_size (int): Batch size for processing sequences.
         aggregate (str): "sum" for total log-likelihood, "mean" for average log-likelihood
+        mask_chunk_size (int): Number of masked positions evaluated per forward.
     Returns:
         dict: A dictionary mapping sequence IDs to their perplexity scores.
     """
@@ -381,6 +435,8 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     
     # Enable mixed precision and optimizations
     if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         if use_fp16:
             model = model.half()  # Use FP16 for better memory efficiency
             print(f"Model loaded on {device} with FP16 precision")
@@ -431,8 +487,14 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     
     # Compute all scores using optimized batch processing
     batch_scores = compute_pseudo_ppl_hf_batch(
-        sequences, model, tokenizer, aggregate=aggregate, 
-        max_batch_size=batch_size, max_seq_len=max_seq_len
+        sequences,
+        model,
+        tokenizer,
+        aggregate=aggregate,
+        max_batch_size=batch_size,
+        max_seq_len=max_seq_len,
+        mask_chunk_size=mask_chunk_size,
+        use_fp16=use_fp16,
     )
     
     batch_time = time.time() - batch_start_time
@@ -538,6 +600,12 @@ def main():
         help="Maximum sequence length for tokenization.",
     )
     parser.add_argument(
+        "--mask-chunk-size",
+        type=int,
+        default=512,
+        help="Number of masked positions to evaluate per forward pass. Increase for more speed, decrease if memory is tight.",
+    )
+    parser.add_argument(
         "--use-fp16",
         action="store_true",
         default=False,
@@ -570,6 +638,7 @@ def main():
             "custom_weights": args.custom_weights,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
+            "mask_chunk_size": args.mask_chunk_size,
             "use_fp16": args.use_fp16,
             "aggregation": args.aggregate,
             "fasta_path": fasta_path,
@@ -585,6 +654,7 @@ def main():
     print(f"Output file: {output_path}")
     print(f"Batch size: {args.batch_size}")
     print(f"Max sequence length: {args.max_seq_len}")
+    print(f"Mask chunk size: {args.mask_chunk_size}")
     print(f"Use FP16: {args.use_fp16}")
     print(f"Aggregation method: {args.aggregate}")
 
@@ -595,7 +665,8 @@ def main():
         aggregate=args.aggregate,
         custom_weights_path=args.custom_weights,
         max_seq_len=args.max_seq_len,
-        use_fp16=args.use_fp16
+        use_fp16=args.use_fp16,
+        mask_chunk_size=args.mask_chunk_size,
     )
     
     # Save results with config details
@@ -610,6 +681,7 @@ def main():
         "tier": args.tier,
         "fasta_file": fasta_path,
         "batch_size": args.batch_size,
+        "mask_chunk_size": args.mask_chunk_size,
         "aggregation": args.aggregate,
         "total_sequences": len(results)
     }
