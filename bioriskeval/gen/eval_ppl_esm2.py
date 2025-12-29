@@ -117,11 +117,11 @@ def compute_pseudo_ppl_hf_batch(
     max_batch_size: int = 32,
     max_seq_len: int = 1024,
     mask_chunk_size: int = 512,
-    use_fp16: bool = True,
     num_prefetch: int = 2,
 ) -> List[float]:
     """
     Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching and prefetching.
+    Uses BF16 precision.
     
     Args:
         sequences: List of protein sequences
@@ -168,7 +168,6 @@ def compute_pseudo_ppl_hf_batch(
             max_seq_len,
             device,
             mask_chunk_size,
-            use_fp16,
             num_prefetch,
         )
         scores.extend(group_scores)
@@ -184,12 +183,12 @@ def process_sequence_group_batch(
     max_seq_len: int,
     device,
     mask_chunk_size: int,
-    use_fp16: bool,
     num_prefetch: int = 2,
 ) -> List[float]:
     """
     Process a group of similar-length sequences in batches with prefetching.
     Prefetch next batches in background to avoid GPU idle time.
+    Uses BF16 precision.
     """
     scores = []
     
@@ -264,7 +263,6 @@ def process_sequence_group_batch(
                 aggregate,
                 device,
                 mask_chunk_size,
-                use_fp16,
             )
             scores.extend(batch_scores)
             
@@ -286,12 +284,12 @@ def compute_batch_pseudo_ppl_from_tensors(
     aggregate: str,
     device,
     mask_chunk_size: int,
-    use_fp16: bool,
 ) -> List[float]:
     """
     Compute pseudo-perplexity from pre-prepared tensors.
     This function only does GPU compute, allowing CPU preparation to happen in parallel.
     All GPU operations complete before any CPU transfer to minimize GPU-CPU overhead.
+    Uses BF16 precision.
     """
     # Use CUDA stream for async data transfer if available
     if device.type == 'cuda':
@@ -316,8 +314,9 @@ def compute_batch_pseudo_ppl_from_tensors(
     log_sums = torch.zeros(batch_size, device=device, dtype=torch.float32)
     counts = torch.zeros(batch_size, device=device, dtype=torch.float32)
 
-    autocast_enabled = use_fp16 and device.type == "cuda"
-    autocast_context = torch.cuda.amp.autocast(dtype=torch.float16) if autocast_enabled else contextlib.nullcontext()
+    # Use BF16 autocast
+    autocast_enabled = device.type == "cuda"
+    autocast_context = torch.cuda.amp.autocast(dtype=torch.bfloat16) if autocast_enabled else contextlib.nullcontext()
 
     # Process all chunks - stay on GPU
     for chunk_start in range(0, total_positions, mask_chunk_size):
@@ -370,15 +369,15 @@ def compute_pseudo_ppl_hf(
     tokenizer,
     aggregate: str = "mean",
     mask_chunk_size: int = 512,
-    use_fp16: bool = True,
     num_prefetch: int = 2,
 ) -> List[float]:
     """
     Legacy function - redirects to optimized batch version.
+    Uses BF16 precision.
     """
     return compute_pseudo_ppl_hf_batch(sequences, model, tokenizer, aggregate, 
                                      max_batch_size=16, max_seq_len=1024,
-                                     mask_chunk_size=mask_chunk_size, use_fp16=use_fp16,
+                                     mask_chunk_size=mask_chunk_size,
                                      num_prefetch=num_prefetch)
 
 def generate_fasta_path(tier: str) -> str:
@@ -571,7 +570,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
                   batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
-                  max_seq_len: int = 1024, use_fp16: bool = True, mask_chunk_size: int = 512,
+                  max_seq_len: int = 1024, mask_chunk_size: int = 512,
                   num_prefetch: int = 2, use_compile: bool = False, 
                   use_flash_attn: bool = True) -> Dict[str, float]:
     """
@@ -604,15 +603,15 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
     
-    # Enable mixed precision and optimizations
+    # Enable mixed precision and optimizations (BF16 only)
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        if use_fp16:
-            model = model.half()  # Use FP16 for better memory efficiency
-            print(f"Model loaded on {device} with FP16 precision")
-        else:
-            print(f"Model loaded on {device} with FP32 precision")
+        
+        # Always use BF16
+        model = model.to(dtype=torch.bfloat16)
+        print(f"Model loaded on {device} with BF16 precision")
+        
         torch.backends.cudnn.benchmark = True
         
         # Enable PyTorch native SDPA optimizations (fallback/complement to Flash Attention 2)
@@ -673,7 +672,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     cleanup_gpu_memory()
     print_gpu_memory_info("before processing")
     
-    # Compute all scores using optimized batch processing with prefetching
+    # Compute all scores using optimized batch processing with prefetching (BF16)
     batch_scores = compute_pseudo_ppl_hf_batch(
         sequences,
         model,
@@ -682,7 +681,6 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         max_batch_size=batch_size,
         max_seq_len=max_seq_len,
         mask_chunk_size=mask_chunk_size,
-        use_fp16=use_fp16,
         num_prefetch=num_prefetch,
     )
     
@@ -795,12 +793,6 @@ def main():
         help="Number of masked positions to evaluate per forward pass. Increase for more speed, decrease if memory is tight.",
     )
     parser.add_argument(
-        "--use-fp16",
-        action="store_true",
-        default=False,
-        help="Use FP16 precision for better memory efficiency.",
-    )
-    parser.add_argument(
         "--num-prefetch",
         type=int,
         default=4,
@@ -846,7 +838,7 @@ def main():
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
-            "use_fp16": args.use_fp16,
+            "precision": "bf16",  # Always BF16
             "use_compile": args.use_compile,
             "use_flash_attn": args.use_flash_attn,
             "num_prefetch": args.num_prefetch,
@@ -866,7 +858,7 @@ def main():
     print(f"Max sequence length: {args.max_seq_len}")
     print(f"Mask chunk size: {args.mask_chunk_size}")
     print(f"Prefetch batches: {args.num_prefetch}")
-    print(f"Use FP16: {args.use_fp16}")
+    print("Precision: BF16 (hardcoded)")
     print(f"Use torch.compile: {args.use_compile}")
     print(f"Use Flash Attention 2: {args.use_flash_attn}")
     print(f"Aggregation method: {args.aggregate}")
@@ -878,7 +870,6 @@ def main():
         aggregate=args.aggregate,
         custom_weights_path=args.custom_weights,
         max_seq_len=args.max_seq_len,
-        use_fp16=args.use_fp16,
         mask_chunk_size=args.mask_chunk_size,
         num_prefetch=args.num_prefetch,
         use_compile=args.use_compile,
@@ -898,6 +889,7 @@ def main():
         "fasta_file": fasta_path,
         "batch_size": args.batch_size,
         "mask_chunk_size": args.mask_chunk_size,
+        "precision": "bf16",
         "aggregation": args.aggregate,
         "total_sequences": len(results)
     }
