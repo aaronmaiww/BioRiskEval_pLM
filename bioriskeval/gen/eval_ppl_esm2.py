@@ -828,9 +828,10 @@ def main():
     else:
         output_path = args.output
 
-    # Generate wandb run name: {model_ckpt}_eval_on_{eval_tier}
-    model_name_clean = args.ckpt_path.replace("/", "_")
-    wandb_run_name = f"{model_name_clean}_eval_on_{args.tier}"
+    # Generate wandb run name: {model_name}_eval_on_{eval_tier}
+    # Extract model name from path (e.g., "given131/150M_T1" -> "150M_T1")
+    model_name = args.ckpt_path.split("/")[-1]
+    wandb_run_name = f"{model_name}_eval_on_{args.tier}"
 
     # Initialize wandb
     wandb.init(
