@@ -287,22 +287,35 @@ def compute_batch_pseudo_ppl_from_tensors(
     """
     Compute pseudo-perplexity from pre-prepared tensors.
     This function only does GPU compute, allowing CPU preparation to happen in parallel.
+    All GPU operations complete before any CPU transfer to minimize GPU-CPU overhead.
     """
-    # Move tensors to GPU with non_blocking for overlap
-    expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
-    expanded_attention = expanded_attention.to(device, non_blocking=True)
-    positions_flat = positions_flat.to(device, non_blocking=True)
-    token_targets_flat = token_targets_flat.to(device, non_blocking=True)
-    seq_indices = seq_indices.to(device, non_blocking=True)
+    # Use CUDA stream for async data transfer if available
+    if device.type == 'cuda':
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
+            expanded_attention = expanded_attention.to(device, non_blocking=True)
+            positions_flat = positions_flat.to(device, non_blocking=True)
+            token_targets_flat = token_targets_flat.to(device, non_blocking=True)
+            seq_indices = seq_indices.to(device, non_blocking=True)
+        stream.synchronize()
+    else:
+        expanded_input_ids = expanded_input_ids.to(device)
+        expanded_attention = expanded_attention.to(device)
+        positions_flat = positions_flat.to(device)
+        token_targets_flat = token_targets_flat.to(device)
+        seq_indices = seq_indices.to(device)
     
     total_positions = expanded_input_ids.size(0)
     
-    log_sums = torch.zeros(batch_size, device=device)
-    counts = torch.zeros(batch_size, device=device)
+    # Pre-allocate result tensors on GPU
+    log_sums = torch.zeros(batch_size, device=device, dtype=torch.float32)
+    counts = torch.zeros(batch_size, device=device, dtype=torch.float32)
 
     autocast_enabled = use_fp16 and device.type == "cuda"
     autocast_context = torch.cuda.amp.autocast(dtype=torch.float16) if autocast_enabled else contextlib.nullcontext()
 
+    # Process all chunks - stay on GPU
     for chunk_start in range(0, total_positions, mask_chunk_size):
         chunk_end = min(chunk_start + mask_chunk_size, total_positions)
         chunk_inputs = expanded_input_ids[chunk_start:chunk_end]
@@ -323,22 +336,23 @@ def compute_batch_pseudo_ppl_from_tensors(
 
         log_sums.scatter_add_(0, chunk_seq_indices, token_log_probs)
         counts.scatter_add_(0, chunk_seq_indices, torch.ones_like(token_log_probs))
-
-        if chunk_start % (mask_chunk_size * 8) == 0:
-            cleanup_gpu_memory()
     
-    scores = []
-    for idx in range(batch_size):
-        if counts[idx] == 0:
-            scores.append(float("nan"))
+    # Finish ALL GPU computation before transferring to CPU
+    with torch.inference_mode():
+        if aggregate == "sum":
+            results_tensor = log_sums
+        elif aggregate == "mean":
+            # mean: divide on GPU, handle division by zero
+            results_tensor = torch.where(
+                counts > 0,
+                log_sums / counts,
+                torch.tensor(float('nan'), device=device, dtype=log_sums.dtype)
+            )
         else:
-            if aggregate == "sum":
-                score = log_sums[idx].item()
-            elif aggregate == "mean":
-                score = (log_sums[idx] / counts[idx]).item()
-            else:
-                raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
-            scores.append(score)
+            raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
+    
+    # Single bulk GPU->CPU transfer
+    scores = results_tensor.cpu().numpy().tolist()
     
     return scores
 
@@ -603,19 +617,19 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     batch_time = time.time() - batch_start_time
     processing_times.append(batch_time)
     
-    # Convert scores to perplexities and store results
-    batch_perplexities = []
-    for seq_id, score in zip(seq_ids, batch_scores):
-        # Convert log-likelihood to perplexity: exp(-log_likelihood)
-        if not torch.isnan(torch.tensor(score)):
-            perplexity = torch.exp(-torch.tensor(score)).item() 
-        else:
-            perplexity = float("nan")
-        results[seq_id] = perplexity
-        
-        if not np.isnan(perplexity):
-            batch_perplexities.append(perplexity)
-            all_perplexities.append(perplexity)
+    # Convert scores to perplexities using vectorized operations
+    # Convert log-likelihood to perplexity: exp(-log_likelihood)
+    scores_array = np.array(batch_scores)
+    perplexities_array = np.exp(-scores_array)
+    
+    # Store results in dictionary
+    for seq_id, perplexity in zip(seq_ids, perplexities_array):
+        results[seq_id] = float(perplexity)
+    
+    # Collect valid perplexities for statistics
+    valid_mask = ~np.isnan(perplexities_array)
+    batch_perplexities = perplexities_array[valid_mask].tolist()
+    all_perplexities.extend(batch_perplexities)
     
     # Monitor GPU memory after processing
     allocated, reserved, peak = print_gpu_memory_info("after processing")
