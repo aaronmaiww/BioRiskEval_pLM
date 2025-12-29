@@ -2,13 +2,29 @@
 
 import argparse
 import torch
-import os
-from pathlib import Path
 from Bio import SeqIO
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from transformers import AutoTokenizer, EsmForMaskedLM
 import torch.nn.functional as F
+
+MODELS = [
+    # 8M
+    "given131/8M_T1", "given131/8M_T2", "given131/8M_T5", "given131/8M_T6",
+    "given131/8M_H",  "given131/8M_F",
+    # 35M
+    "given131/35M_T1", "given131/35M_T2", "given131/35M_T5", "given131/35M_T6",
+    "given131/35M_H",  "given131/35M_F",
+    # 150M
+    "given131/150M_T1", "given131/150M_T2", "given131/150M_T5", "given131/150M_T6",
+    "given131/150M_H",  "given131/150M_F",
+]
+
+FACEBOOK_CONFIG = {
+    "8M":   "facebook/esm2_t6_8M_UR50D",
+    "35M":  "facebook/esm2_t12_35M_UR50D",
+    "150M": "facebook/esm2_t30_150M_UR50D",
+}
 
 def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str = "mean") -> List[float]:
     """
@@ -68,45 +84,133 @@ def compute_pseudo_ppl_hf(sequences: List[str], model, tokenizer, aggregate: str
     
     return scores
 
-def load_esm2_model(ckpt_path: str, custom_weights_path: str = None) -> tuple:
+def generate_fasta_path(tier: str) -> str:
+    """
+    Generate FASTA file path from tier number.
+    
+    Args:
+        tier (str): Tier number (e.g., '1', '2', '3')
+    Returns:
+        str: Path to the FASTA file
+    """
+    return f"/workspace/BioRiskEval_pLM/tier-list/tier{tier}_sequences.fasta"
+
+def generate_output_filename(model_name: str, tier: str) -> str:
+    """
+    Generate output filename from model name and tier.
+    
+    Args:
+        model_name (str): Model name (e.g., 'given131/8M_T1' or 'facebook/esm2_t6_8M_UR50D')
+        tier (str): Tier number
+    Returns:
+        str: Output filename
+    """
+    # Clean model name for filename (replace / with _)
+    clean_model_name = model_name.replace("/", "_")
+    return f"{clean_model_name}_eval_on_{tier}.txt"
+
+def parse_model_size(model_name: str) -> str:
+    """
+    Parse model size from HuggingFace model name.
+    
+    Args:
+        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
+    Returns:
+        str: Model size key ("8M", "35M", "150M")
+    """
+    if "8M" in model_name:
+        return "8M"
+    elif "35M" in model_name:
+        return "35M"
+    elif "150M" in model_name:
+        return "150M"
+    else:
+        raise ValueError(f"Cannot determine model size from: {model_name}")
+
+def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None) -> tuple:
     """
     Load ESM2 model using HuggingFace transformers.
     
     Args:
-        ckpt_path (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D")
+        ckpt_path (str): HuggingFace model name (e.g., "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D")
         custom_weights_path (str, optional): Path to custom weights file (.pt or .pth)
     Returns:
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
     """
-    # Initialize tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    model = EsmForMaskedLM.from_pretrained(ckpt_path)
-    
-    # Load custom weights if provided
-    if custom_weights_path:
-        print(f"Loading custom weights from: {custom_weights_path}")
+    # Determine the base Facebook model architecture
+    if ckpt_path.startswith("given131/"):
+        # Parse model size and get corresponding Facebook config
+        model_size = parse_model_size(ckpt_path)
+        facebook_model = FACEBOOK_CONFIG[model_size]
+        print(f"Using custom model {ckpt_path} with architecture from {facebook_model}")
+        
+        # Initialize tokenizer and model from Facebook architecture
+        tokenizer = AutoTokenizer.from_pretrained(facebook_model)
+        model = EsmForMaskedLM.from_pretrained(facebook_model)
+        
+        # Load custom weights from HuggingFace model
         try:
-            custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
+            print(f"Loading custom weights from HuggingFace model: {ckpt_path}")
+            from huggingface_hub import hf_hub_download
             
-            # Handle different state dict formats
-            if 'model' in custom_state_dict:
-                custom_state_dict = custom_state_dict['model']
-            elif 'state_dict' in custom_state_dict:
-                custom_state_dict = custom_state_dict['state_dict']
+            # Download model.bin file
+            model_bin_path = hf_hub_download(repo_id=ckpt_path, filename="model.bin")
+            custom_state_dict = torch.load(model_bin_path, map_location='cpu')
+            
+            # Extract model_state_dict from the ordered_dict
+            if 'model_state_dict' in custom_state_dict:
+                model_weights = custom_state_dict['model_state_dict']
+                print("Found 'model_state_dict' in checkpoint")
+            else:
+                print("Warning: 'model_state_dict' not found, using full state dict")
+                model_weights = custom_state_dict
             
             # Load the state dict (strict=False to allow partial loading)
-            missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
+            missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
             
             if missing_keys:
                 print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
             if unexpected_keys:
                 print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
                 
-            print("Custom weights loaded successfully")
-        except Exception as e:
-            print(f"Warning: Failed to load custom weights: {e}")
+            print("Custom weights loaded successfully from HuggingFace")
+        except (ImportError, OSError, RuntimeError) as e:
+            print(f"Warning: Failed to load custom weights from HuggingFace: {e}")
             print("Continuing with pretrained weights...")
+    
+    else:
+        # Standard Facebook model
+        print(f"Using standard Facebook model: {ckpt_path}")
+        tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+        model = EsmForMaskedLM.from_pretrained(ckpt_path)
+        
+        # Load additional custom weights if provided
+        if custom_weights_path:
+            print(f"Loading additional custom weights from: {custom_weights_path}")
+            try:
+                custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
+                
+                # Handle different state dict formats
+                if 'model_state_dict' in custom_state_dict:
+                    custom_state_dict = custom_state_dict['model_state_dict']
+                elif 'model' in custom_state_dict:
+                    custom_state_dict = custom_state_dict['model']
+                elif 'state_dict' in custom_state_dict:
+                    custom_state_dict = custom_state_dict['state_dict']
+                
+                # Load the state dict (strict=False to allow partial loading)
+                missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
+                
+                if missing_keys:
+                    print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
+                if unexpected_keys:
+                    print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
+                    
+                print("Additional custom weights loaded successfully")
+            except (ImportError, OSError, RuntimeError) as e:
+                print(f"Warning: Failed to load additional custom weights: {e}")
+                print("Continuing with model weights...")
     
     model.eval()
     return model, tokenizer
@@ -129,7 +233,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
-                  batch_size: int = 32, aggregate: str = "mean", custom_weights_path: str = None) -> Dict[str, float]:
+                  batch_size: int = 32, aggregate: str = "mean", custom_weights_path: Optional[str] = None) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -174,16 +278,16 @@ def main():
         description="Evaluate perplexity of sequences using ESM2 models."
     )
     parser.add_argument(
-        "--fasta",
+        "--tier",
         type=str,
         required=True,
-        help="Path to the input FASTA file containing sequences.",
+        help="Tier number for sequences (e.g., '1', '2', '3'). Will load from /workspace/BioRiskEval_pLM/tier-list/tier{tier}_sequences.fasta",
     )
     parser.add_argument(
         "--ckpt-path",
         type=str,
         default="facebook/esm2_t6_8M_UR50D",
-        help="HuggingFace model name (e.g., 'facebook/esm2_t6_8M_UR50D', 'facebook/esm2_t33_650M_UR50D').",
+        help="HuggingFace model name. Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'given131/35M_H', 'given131/150M_F'.",
     )
     parser.add_argument(
         "--custom-weights",
@@ -207,19 +311,30 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        required=True,
-        help="Path to the output file to save perplexity results.",
+        default=None,
+        help="Path to the output file to save perplexity results. If not provided, will auto-generate as {model_name}_eval_on_{tier}.txt",
     )
  
     args = parser.parse_args()
 
+    # Generate FASTA path from tier
+    fasta_path = generate_fasta_path(args.tier)
+    
+    # Generate output filename if not provided
+    if args.output is None:
+        output_path = generate_output_filename(args.ckpt_path, args.tier)
+    else:
+        output_path = args.output
+
     print(f"Evaluating perplexity using ESM2 model: {args.ckpt_path}")
-    print(f"Input FASTA: {args.fasta}")
+    print(f"Tier: {args.tier}")
+    print(f"Input FASTA: {fasta_path}")
+    print(f"Output file: {output_path}")
     print(f"Batch size: {args.batch_size}")
     print(f"Aggregation method: {args.aggregate}")
 
     results = eval_ppl_esm2(
-        fasta_path=args.fasta,
+        fasta_path=fasta_path,
         ckpt_path=args.ckpt_path,
         batch_size=args.batch_size,
         aggregate=args.aggregate,
@@ -228,7 +343,6 @@ def main():
     
     # Save results with config details
     import datetime
-    import os
     
     # Create config info
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -236,13 +350,14 @@ def main():
         "timestamp": timestamp,
         "model": args.ckpt_path,
         "custom_weights": args.custom_weights or "None",
-        "fasta_file": args.fasta,
+        "tier": args.tier,
+        "fasta_file": fasta_path,
         "batch_size": args.batch_size,
         "aggregation": args.aggregate,
         "total_sequences": len(results)
     }
     
-    with open(args.output, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         # Write config header as comments
         f.write("# ESM2 Perplexity Evaluation Results\n")
         for key, value in config_info.items():
@@ -254,7 +369,7 @@ def main():
         for seq_id, ppl in results.items():
             f.write(f"{seq_id}\t{ppl}\n")
     
-    print(f"Perplexity results saved to {args.output}")
+    print(f"Perplexity results saved to {output_path}")
     print(f"Processed {len(results)} sequences.")
     
 
