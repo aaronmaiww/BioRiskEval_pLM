@@ -420,17 +420,31 @@ def parse_model_size(model_name: str) -> str:
     else:
         raise ValueError(f"Cannot determine model size from: {model_name}")
 
-def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None) -> tuple:
+def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None, 
+                    use_flash_attn: bool = True) -> tuple:
     """
     Load ESM2 model using HuggingFace transformers.
     
     Args:
         ckpt_path (str): HuggingFace model name (e.g., "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D")
         custom_weights_path (str, optional): Path to custom weights file (.pt or .pth)
+        use_flash_attn (bool): Use Flash Attention 2 if available (requires flash-attn package)
     Returns:
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
     """
+    # Check Flash Attention 2 availability
+    attn_implementation = None
+    if use_flash_attn:
+        try:
+            import flash_attn
+            attn_implementation = "flash_attention_2"
+            print(f"Flash Attention 2 available (version {flash_attn.__version__})")
+        except ImportError:
+            print("Flash Attention 2 not installed. Install with: pip install flash-attn --no-build-isolation")
+            print("Falling back to SDPA (still fast on modern GPUs)")
+            attn_implementation = "sdpa"  # Use PyTorch's native SDPA as fallback
+    
     # Determine the base Facebook model architecture
     if ckpt_path.startswith("given131/"):
         # Parse model size and get corresponding Facebook config
@@ -440,7 +454,20 @@ def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None) -
         
         # Initialize tokenizer and model from Facebook architecture
         tokenizer = AutoTokenizer.from_pretrained(facebook_model)
-        model = EsmForMaskedLM.from_pretrained(facebook_model)
+        
+        # Load model with attention implementation
+        model_kwargs = {}
+        if attn_implementation:
+            model_kwargs["attn_implementation"] = attn_implementation
+        
+        try:
+            model = EsmForMaskedLM.from_pretrained(facebook_model, **model_kwargs)
+            if attn_implementation:
+                print(f"Model loaded with {attn_implementation} attention")
+        except Exception as e:
+            print(f"Failed to load with {attn_implementation}: {e}")
+            print("Falling back to default attention")
+            model = EsmForMaskedLM.from_pretrained(facebook_model)
         
         # Load custom weights from HuggingFace model
         try:
@@ -476,7 +503,20 @@ def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None) -
         # Standard Facebook model
         print(f"Using standard Facebook model: {ckpt_path}")
         tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-        model = EsmForMaskedLM.from_pretrained(ckpt_path)
+        
+        # Load model with attention implementation
+        model_kwargs = {}
+        if attn_implementation:
+            model_kwargs["attn_implementation"] = attn_implementation
+        
+        try:
+            model = EsmForMaskedLM.from_pretrained(ckpt_path, **model_kwargs)
+            if attn_implementation:
+                print(f"Model loaded with {attn_implementation} attention")
+        except Exception as e:
+            print(f"Failed to load with {attn_implementation}: {e}")
+            print("Falling back to default attention")
+            model = EsmForMaskedLM.from_pretrained(ckpt_path)
         
         # Load additional custom weights if provided
         if custom_weights_path:
@@ -528,7 +568,8 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
                   batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
                   max_seq_len: int = 1024, use_fp16: bool = True, mask_chunk_size: int = 512,
-                  num_prefetch: int = 2, use_compile: bool = False) -> Dict[str, float]:
+                  num_prefetch: int = 2, use_compile: bool = False, 
+                  use_flash_attn: bool = True) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
 
@@ -540,6 +581,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         mask_chunk_size (int): Number of masked positions evaluated per forward.
         num_prefetch (int): Number of batches to prefetch in background (default 2).
         use_compile (bool): Use torch.compile() for model optimization (PyTorch 2.0+).
+        use_flash_attn (bool): Use Flash Attention 2 if available.
     Returns:
         dict: A dictionary mapping sequence IDs to their perplexity scores.
     """
@@ -548,7 +590,11 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     # Load ESM2 model using HuggingFace
     print("Loading model...")
     model_load_start = time.time()
-    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path, custom_weights_path=custom_weights_path)
+    model, tokenizer = load_esm2_model(
+        ckpt_path=ckpt_path, 
+        custom_weights_path=custom_weights_path,
+        use_flash_attn=use_flash_attn
+    )
     
     # Move model to GPU and optimize
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -565,11 +611,12 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
             print(f"Model loaded on {device} with FP32 precision")
         torch.backends.cudnn.benchmark = True
         
-        # Enable Flash Attention if available (PyTorch 2.0+)
+        # Enable PyTorch native SDPA optimizations (fallback/complement to Flash Attention 2)
         if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
             torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_mem_efficient_sdp(True)
-            print("Flash Attention enabled")
+            torch.backends.cuda.enable_math_sdp(False)  # Disable slow math fallback
+            print("PyTorch SDPA optimizations enabled")
         
         print_gpu_memory_info("after model loading")
     
@@ -760,6 +807,12 @@ def main():
         help="Use torch.compile() for model optimization (PyTorch 2.0+). ~20-40%% faster after warmup.",
     )
     parser.add_argument(
+        "--use-flash-attn",
+        action="store_true",
+        default=True,
+        help="Use Flash Attention 2 if available. Requires: pip install flash-attn --no-build-isolation",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -789,6 +842,7 @@ def main():
             "mask_chunk_size": args.mask_chunk_size,
             "use_fp16": args.use_fp16,
             "use_compile": args.use_compile,
+            "use_flash_attn": args.use_flash_attn,
             "num_prefetch": args.num_prefetch,
             "aggregation": args.aggregate,
             "fasta_path": fasta_path,
@@ -808,6 +862,7 @@ def main():
     print(f"Prefetch batches: {args.num_prefetch}")
     print(f"Use FP16: {args.use_fp16}")
     print(f"Use torch.compile: {args.use_compile}")
+    print(f"Use Flash Attention 2: {args.use_flash_attn}")
     print(f"Aggregation method: {args.aggregate}")
 
     results = eval_ppl_esm2(
@@ -821,6 +876,7 @@ def main():
         mask_chunk_size=args.mask_chunk_size,
         num_prefetch=args.num_prefetch,
         use_compile=args.use_compile,
+        use_flash_attn=args.use_flash_attn,
     )
     
     # Save results with config details
