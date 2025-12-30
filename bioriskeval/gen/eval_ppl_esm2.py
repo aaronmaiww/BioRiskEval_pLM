@@ -405,6 +405,30 @@ def generate_output_filename(model_name: str, tier: str) -> str:
     clean_model_name = model_name.replace("/", "_")
     return f"output/{clean_model_name}_eval_on_{tier}.txt"
 
+def parse_model_tier(model_name: str) -> str:
+    """
+    Parse model tier from HuggingFace model name.
+    
+    Args:
+        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
+    Returns:
+        str: Tier number (e.g., '1', '2', '3')
+    """
+    if "T1" in model_name:
+        return "1"
+    elif "T2" in model_name:
+        return "2"
+    elif "T5" in model_name:
+        return "5"
+    elif "T6" in model_name:
+        return "6"
+    elif "H" in model_name:
+        return "H"
+    elif "F" in model_name:
+        return "F"
+    else:
+        raise ValueError(f"Cannot determine model tier from: {model_name}")
+
 def parse_model_size(model_name: str) -> str:
     """
     Parse model size from HuggingFace model name.
@@ -853,8 +877,9 @@ def main():
             "fasta_path": fasta_path,
             "output_path": output_path,
         },
-        tags=[f"tier_{args.tier}", 
-              parse_model_size(args.ckpt_path) if any(size in args.ckpt_path for size in ["8M", "35M", "150M"]) else "unknown_size"]
+        tags=[f"tier_{args.tier}",
+              f"trained_on_{parse_model_tier(args.ckpt_path)}",
+              f"size_{parse_model_size(args.ckpt_path)}"]
     )
 
     print(f"Evaluating perplexity using ESM2 model: {args.ckpt_path}")
