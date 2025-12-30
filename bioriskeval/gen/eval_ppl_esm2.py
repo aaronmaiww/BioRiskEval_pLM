@@ -835,7 +835,7 @@ def main():
 
     # Initialize wandb
     wandb.init(
-        project="esm2-gen-eval",
+        project="esm2-gen-eval-random",
         name=wandb_run_name,
         config={
             "model_ckpt": args.ckpt_path,
