@@ -403,7 +403,7 @@ def generate_output_filename(model_name: str, tier: str) -> str:
     """
     # Clean model name for filename (replace / with _)
     clean_model_name = model_name.replace("/", "_")
-    return f"{clean_model_name}_eval_on_{tier}.txt"
+    return f"output/{clean_model_name}_eval_on_{tier}.txt"
 
 def parse_model_size(model_name: str) -> str:
     """
@@ -823,6 +823,7 @@ def main():
     fasta_path = generate_fasta_path(args.tier)
     
     # Generate output filename if not provided
+    os.makedirs("output", exist_ok=True)
     if args.output is None:
         output_path = generate_output_filename(args.ckpt_path, args.tier)
     else:
