@@ -132,7 +132,7 @@ def score_dms_dataset(
     aggregate: str = "sum",
     max_seq_len: int = 1024,
     mask_chunk_size: int = 512,
-    num_prefetch: int = 2,
+    num_workers: int = 4,
     use_compile: bool = False,
     use_flash_attn: bool = True,
 ) -> Tuple[pd.DataFrame, float, float]:
@@ -146,7 +146,7 @@ def score_dms_dataset(
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
         max_seq_len: Maximum sequence length
         mask_chunk_size: Number of masked positions evaluated per forward
-        num_prefetch: Number of batches to prefetch in background
+        num_workers: Number of DataLoader workers for prefetching
         use_compile: Use torch.compile() for optimization
         use_flash_attn: Use Flash Attention 2 if available
     
@@ -202,7 +202,7 @@ def score_dms_dataset(
     # Monitor GPU memory before processing
     cleanup_gpu_memory()
     
-    # Use optimized batch processing with prefetching (BF16)
+    # Use optimized batch processing with DataLoader (BF16)
     scoring_start = time.time()
     all_scores = compute_pseudo_ppl_hf_batch(
         sequences,
@@ -212,7 +212,7 @@ def score_dms_dataset(
         max_batch_size=batch_size,
         max_seq_len=max_seq_len,
         mask_chunk_size=mask_chunk_size,
-        num_prefetch=num_prefetch,
+        num_workers=num_workers,
     )
     scoring_time = time.time() - scoring_start
     print(f"Scoring completed in {scoring_time:.2f}s ({len(sequences)/scoring_time:.2f} sequences/sec)")
@@ -274,10 +274,10 @@ def main():
         help="Number of masked positions to evaluate per forward pass. Increase for more speed, decrease if memory is tight."
     )
     parser.add_argument(
-        "--num-prefetch",
+        "--num-workers",
         type=int,
-        default=2,
-        help="Number of batches to prefetch in background. Increase for better GPU utilization."
+        default=4,
+        help="Number of DataLoader workers for batch prefetching. Increase for better CPU-GPU overlap."
     )
     parser.add_argument(
         "--aggregate",
@@ -329,7 +329,7 @@ def main():
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
-            "num_prefetch": args.num_prefetch,
+            "num_workers": args.num_workers,
             "n_samples": args.n_samples,
             "output_dir": args.output_dir,
         },
@@ -348,7 +348,7 @@ def main():
         print(f"Batch size: {args.batch_size}")
         print(f"Max sequence length: {args.max_seq_len}")
         print(f"Mask chunk size: {args.mask_chunk_size}")
-        print(f"Prefetch batches: {args.num_prefetch}")
+        print(f"DataLoader workers: {args.num_workers}")
         print("Precision: BF16 (hardcoded)")
         print(f"Use torch.compile: {args.use_compile}")
         print(f"Use Flash Attention 2: {args.use_flash_attn}")
@@ -380,7 +380,7 @@ def main():
             aggregate=args.aggregate,
             max_seq_len=args.max_seq_len,
             mask_chunk_size=args.mask_chunk_size,
-            num_prefetch=args.num_prefetch,
+            num_workers=args.num_workers,
             use_compile=args.use_compile,
             use_flash_attn=args.use_flash_attn,
         )
@@ -445,7 +445,7 @@ def main():
             'batch_size': args.batch_size,
             'max_seq_len': args.max_seq_len,
             'mask_chunk_size': args.mask_chunk_size,
-            'num_prefetch': args.num_prefetch,
+            'num_workers': args.num_workers,
             'use_compile': args.use_compile,
             'use_flash_attn': args.use_flash_attn,
             'aggregate': args.aggregate,
