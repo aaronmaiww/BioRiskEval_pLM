@@ -9,9 +9,9 @@ from typing import List, Dict, Optional, Tuple
 import time
 import numpy as np
 import gc
-from concurrent.futures import ThreadPoolExecutor
 import os
 
+from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, EsmForMaskedLM
 import torch.nn.functional as F
 import wandb
@@ -42,15 +42,28 @@ def cleanup_gpu_memory():
         torch.cuda.empty_cache()
         gc.collect()
 
-def prepare_batch_tensors(
+
+class ProteinSequenceDataset(Dataset):
+    """Dataset for protein sequences."""
+    
+    def __init__(self, sequences: List[str]):
+        self.sequences = sequences
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        return self.sequences[idx]
+
+
+def collate_batch_tensors(
     sequences: List[str],
     tokenizer,
     max_seq_len: int,
-    device,
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], 
            Optional[torch.Tensor], Optional[torch.Tensor], int]:
     """
-    Prepare all tensors for a batch on CPU with pinned memory for fast GPU transfer.
+    Collate function for DataLoader. Prepare all tensors for a batch on CPU.
     Returns: (expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size)
     """
     # Tokenize on CPU
@@ -67,14 +80,9 @@ def prepare_batch_tensors(
     if total_positions == 0:
         return None, None, None, None, None, batch_size
     
-    # Build expanded tensors on CPU with pinned memory
+    # Build expanded tensors on CPU (DataLoader will handle pinning if pin_memory=True)
     expanded_input_ids = input_ids.repeat_interleave(positions_per_seq, dim=0)
     expanded_attention = attention_mask.repeat_interleave(positions_per_seq, dim=0)
-    
-    # Pin memory for faster GPU transfer
-    if device.type == 'cuda':
-        expanded_input_ids = expanded_input_ids.pin_memory()
-        expanded_attention = expanded_attention.pin_memory()
     
     # VECTORIZED position tensor building (no Python loop!)
     # Create cumulative offsets for each sequence
@@ -105,10 +113,11 @@ def compute_pseudo_ppl_hf_batch(
     max_batch_size: int = 32,
     max_seq_len: int = 1024,
     mask_chunk_size: int = 512,
-    num_prefetch: int = 2,
+    num_workers: int = 4,
 ) -> List[float]:
     """
-    Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching and prefetching.
+    Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching.
+    Uses PyTorch DataLoader for efficient prefetching and multiprocessing.
     Uses BF16 precision.
     
     Args:
@@ -118,7 +127,8 @@ def compute_pseudo_ppl_hf_batch(
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
         max_batch_size: Maximum batch size for processing
         max_seq_len: Maximum sequence length
-        num_prefetch: Number of batches to prefetch in background (default 2)
+        mask_chunk_size: Number of masked positions evaluated per forward pass
+        num_workers: Number of DataLoader workers for prefetching (default 4)
     Returns:
         List of perplexity scores
     """
@@ -156,7 +166,7 @@ def compute_pseudo_ppl_hf_batch(
             max_seq_len,
             device,
             mask_chunk_size,
-            num_prefetch,
+            num_workers,
         )
         scores.extend(group_scores)
     
@@ -171,92 +181,66 @@ def process_sequence_group_batch(
     max_seq_len: int,
     device,
     mask_chunk_size: int,
-    num_prefetch: int = 2,
+    num_workers: int = 4,
 ) -> List[float]:
     """
-    Process a group of similar-length sequences in batches with prefetching.
-    Prefetch next batches in background to avoid GPU idle time.
+    Process a group of similar-length sequences in batches using DataLoader.
+    Uses PyTorch DataLoader for efficient batch prefetching and multiprocessing.
     Uses BF16 precision.
+    
+    Args:
+        num_workers: Number of workers for DataLoader prefetching (default 4)
     """
     scores = []
     
-    # Split into batches
-    batches = []
-    for i in range(0, len(sequences), max_batch_size):
-        batches.append(sequences[i:i + max_batch_size])
-    
-    if not batches:
+    if not sequences:
         return scores
     
-    # Use ThreadPoolExecutor for prefetching batch preparation
-    with ThreadPoolExecutor(max_workers=num_prefetch) as executor:
-        # Submit first num_prefetch batches
-        future_to_idx = {}
-        for idx in range(min(num_prefetch, len(batches))):
-            future = executor.submit(
-                prepare_batch_tensors,
-                batches[idx],
-                tokenizer,
-                max_seq_len,
-                device,
-            )
-            future_to_idx[future] = idx
+    # Create dataset and dataloader
+    dataset = ProteinSequenceDataset(sequences)
+    
+    # Create collate function with tokenizer and max_seq_len bound
+    def collate_fn(batch):
+        return collate_batch_tensors(batch, tokenizer, max_seq_len)
+    
+    # DataLoader handles prefetching automatically with num_workers
+    dataloader = DataLoader(
+        dataset,
+        batch_size=max_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == 'cuda'),
+        collate_fn=collate_fn,
+        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch 2 batches per worker
+        persistent_workers=True if num_workers > 0 else False,
+    )
+    
+    # Process batches from DataLoader
+    for batch_idx, tensors in enumerate(dataloader):
+        expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size = tensors
         
-        next_submit_idx = num_prefetch
+        if expanded_input_ids is None:
+            # Empty batch
+            scores.extend([float("nan")] * batch_size)
+            continue
         
-        # Process batches as they become ready
-        for batch_idx in range(len(batches)):
-            # Wait for current batch to be prepared
-            current_future = None
-            for future, idx in list(future_to_idx.items()):
-                if idx == batch_idx:
-                    current_future = future
-                    break
-            
-            if current_future is None:
-                # Fallback: prepare synchronously if not found
-                tensors = prepare_batch_tensors(batches[batch_idx], tokenizer, max_seq_len, device)
-            else:
-                tensors = current_future.result()
-                del future_to_idx[current_future]
-            
-            # Submit next batch while GPU processes current
-            if next_submit_idx < len(batches):
-                future = executor.submit(
-                    prepare_batch_tensors,
-                    batches[next_submit_idx],
-                    tokenizer,
-                    max_seq_len,
-                    device,
-                )
-                future_to_idx[future] = next_submit_idx
-                next_submit_idx += 1
-            
-            # Process on GPU
-            expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size = tensors
-            
-            if expanded_input_ids is None:
-                # Empty batch
-                scores.extend([float("nan")] * batch_size)
-                continue
-            
-            batch_scores = compute_batch_pseudo_ppl_from_tensors(
-                expanded_input_ids,
-                expanded_attention,
-                positions_flat,
-                token_targets_flat,
-                seq_indices,
-                batch_size,
-                model,
-                aggregate,
-                device,
-                mask_chunk_size,
-            )
-            scores.extend(batch_scores)
-            
-            # Clear GPU cache periodically
-            if batch_idx % 8 == 0 and batch_idx > 0:
-                cleanup_gpu_memory()
+        batch_scores = compute_batch_pseudo_ppl_from_tensors(
+            expanded_input_ids,
+            expanded_attention,
+            positions_flat,
+            token_targets_flat,
+            seq_indices,
+            batch_size,
+            model,
+            aggregate,
+            device,
+            mask_chunk_size,
+        )
+        scores.extend(batch_scores)
+        
+        # Clear GPU cache periodically
+        if batch_idx % 8 == 0 and batch_idx > 0:
+            cleanup_gpu_memory()
     
     return scores
 
@@ -350,22 +334,6 @@ def compute_batch_pseudo_ppl_from_tensors(
     
     return scores
 
-def compute_pseudo_ppl_hf(
-    sequences: List[str],
-    model,
-    tokenizer,
-    aggregate: str = "mean",
-    mask_chunk_size: int = 512,
-    num_prefetch: int = 2,
-) -> List[float]:
-    """
-    Legacy function - redirects to optimized batch version.
-    Uses BF16 precision.
-    """
-    return compute_pseudo_ppl_hf_batch(sequences, model, tokenizer, aggregate, 
-                                     max_batch_size=16, max_seq_len=1024,
-                                     mask_chunk_size=mask_chunk_size,
-                                     num_prefetch=num_prefetch)
 
 def generate_fasta_path(tier: str) -> str:
     """
@@ -412,7 +380,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
                   batch_size: int = 256, aggregate: str = "mean",
                   max_seq_len: int = 1024, mask_chunk_size: int = 512,
-                  num_prefetch: int = 2, use_compile: bool = False, 
+                  num_workers: int = 4, use_compile: bool = False, 
                   use_flash_attn: bool = True) -> Dict[str, float]:
     """
     Evaluate perplexity of sequences in a FASTA file using ESM2 model.
@@ -423,7 +391,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         batch_size (int): Batch size for processing sequences.
         aggregate (str): "sum" for total log-likelihood, "mean" for average log-likelihood
         mask_chunk_size (int): Number of masked positions evaluated per forward.
-        num_prefetch (int): Number of batches to prefetch in background (default 2).
+        num_workers (int): Number of DataLoader workers for prefetching (default 4).
         use_compile (bool): Use torch.compile() for model optimization (PyTorch 2.0+).
         use_flash_attn (bool): Use Flash Attention 2 if available.
     Returns:
@@ -502,14 +470,14 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
 
     # Use optimized batch processing
     print(f"Processing {len(sequences)} sequences with batch size {batch_size}")
-    print("Using optimized GPU batch processing with prefetching...")
+    print(f"Using PyTorch DataLoader with {num_workers} workers for prefetching...")
     
     batch_start_time = time.time()
     
     # Monitor GPU memory before processing
     cleanup_gpu_memory()
     
-    # Compute all scores using optimized batch processing with prefetching (BF16)
+    # Compute all scores using optimized batch processing with DataLoader (BF16)
     batch_scores = compute_pseudo_ppl_hf_batch(
         sequences,
         model,
@@ -518,7 +486,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
         max_batch_size=batch_size,
         max_seq_len=max_seq_len,
         mask_chunk_size=mask_chunk_size,
-        num_prefetch=num_prefetch,
+        num_workers=num_workers,
     )
     
     batch_time = time.time() - batch_start_time
@@ -618,10 +586,10 @@ def main():
         help="Number of masked positions to evaluate per forward pass. Increase for more speed, decrease if memory is tight.",
     )
     parser.add_argument(
-        "--num-prefetch",
+        "--num-workers",
         type=int,
         default=4,
-        help="Number of batches to prefetch in background (default 2). Increase for better GPU utilization.",
+        help="Number of DataLoader workers for batch prefetching (default 4). Increase for better CPU-GPU overlap.",
     )
     parser.add_argument(
         "--use-compile",
@@ -672,7 +640,7 @@ def main():
             "precision": "bf16",  # Always BF16
             "use_compile": args.use_compile,
             "use_flash_attn": args.use_flash_attn,
-            "num_prefetch": args.num_prefetch,
+            "num_workers": args.num_workers,
             "aggregation": args.aggregate,
             "fasta_path": fasta_path,
             "output_path": output_path,
@@ -689,7 +657,7 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print(f"Max sequence length: {args.max_seq_len}")
     print(f"Mask chunk size: {args.mask_chunk_size}")
-    print(f"Prefetch batches: {args.num_prefetch}")
+    print(f"DataLoader workers: {args.num_workers}")
     print("Precision: BF16 (hardcoded)")
     print(f"Use torch.compile: {args.use_compile}")
     print(f"Use Flash Attention 2: {args.use_flash_attn}")
@@ -702,7 +670,7 @@ def main():
         aggregate=args.aggregate,
         max_seq_len=args.max_seq_len,
         mask_chunk_size=args.mask_chunk_size,
-        num_prefetch=args.num_prefetch,
+        num_workers=args.num_workers,
         use_compile=args.use_compile,
         use_flash_attn=args.use_flash_attn,
     )
