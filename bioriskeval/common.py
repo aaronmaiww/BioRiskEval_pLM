@@ -66,6 +66,29 @@ def parse_model_size(model_name: str) -> str:
     else:
         raise ValueError(f"Cannot determine model size from: {model_name}")
 
+
+def get_optimal_batch_size(model_name: str) -> int:
+    """
+    Get optimal batch size based on model size.
+    
+    Args:
+        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
+    Returns:
+        int: Recommended batch size
+    """
+    try:
+        model_size = parse_model_size(model_name)
+        # Optimal batch sizes for 32GB GPU (RTX 5090)
+        batch_size_map = {
+            "8M": 512,
+            "35M": 256,
+            "150M": 128,
+        }
+        return batch_size_map.get(model_size, 256)
+    except ValueError:
+        # Default batch size if cannot determine model size
+        return 256
+
 def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None, 
                     use_flash_attn: bool = True) -> tuple:
     """

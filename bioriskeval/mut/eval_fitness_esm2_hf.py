@@ -18,7 +18,7 @@ from bioriskeval.gen.eval_ppl_esm2 import (
     compute_pseudo_ppl_hf_batch,
     cleanup_gpu_memory
 )
-from bioriskeval.common import parse_model_tier, parse_model_size, load_esm2_model
+from bioriskeval.common import parse_model_tier, parse_model_size, load_esm2_model, get_optimal_batch_size
 
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -246,8 +246,8 @@ def main():
     parser.add_argument(
         "--csv-path",
         type=str,
-        required=True,
-        help="Path to DMS CSV file"
+        default="bioriskeval/mut/data/DMS_ProteinGym_substitutions/DMS_substitutions.csv",
+        help="Path to DMS CSV file (default: bioriskeval/mut/data/DMS_ProteinGym_substitutions/DMS_substitutions.csv)"
     )
     parser.add_argument(
         "--model-name", 
@@ -258,8 +258,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
-        help="Batch size for processing sequences. Larger values use more GPU memory but are faster. Try 512-1024 for 32GB GPU."
+        default=1024,
+        help="Batch size for processing sequences. If not specified, automatically determined based on model size (8M:512, 35M:256, 150M:128)."
     )
     parser.add_argument(
         "--max-seq-len",
@@ -312,6 +312,8 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Auto-determine batch size if not specified
     
     # Generate wandb run name
     dataset_name = Path(args.csv_path).stem
