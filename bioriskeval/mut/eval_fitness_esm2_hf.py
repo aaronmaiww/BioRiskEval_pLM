@@ -127,7 +127,7 @@ def setup_model_optimizations(model, device, use_compile: bool = False):
 
 def score_dms_dataset(
     dms_df: pd.DataFrame,
-    model_name: str,
+    ckpt_path: str,
     batch_size: int = 256,
     aggregate: str = "sum",
     max_seq_len: int = 1024,
@@ -141,7 +141,7 @@ def score_dms_dataset(
     
     Args:
         dms_df: DataFrame with DMS data
-        model_name: HuggingFace model name or path to local weights file (.pt or .pth)
+        ckpt_path: HuggingFace model name or path to local weights file (.pt or .pth)
         batch_size: Batch size for processing
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
         max_seq_len: Maximum sequence length
@@ -165,7 +165,7 @@ def score_dms_dataset(
     print("Loading model...")
     model_load_start = time.time()
     model, tokenizer = load_esm2_model(
-        ckpt_path=model_name,
+        ckpt_path=ckpt_path,
         use_flash_attn=use_flash_attn
     )
     
@@ -250,10 +250,10 @@ def main():
         help="Path to DMS CSV file (default: bioriskeval/mut/data/DMS_ProteinGym_substitutions/DMS_substitutions.csv)"
     )
     parser.add_argument(
-        "--model-name", 
+        "--ckpt-path",
         type=str,
         default="facebook/esm2_t6_8M_UR50D",
-        help="HuggingFace ESM2 model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'."
+        help="HuggingFace model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'.",
     )
     parser.add_argument(
         "--batch-size",
@@ -316,18 +316,16 @@ def main():
     # Auto-determine batch size if not specified
     
     # Generate wandb run name
-    dataset_name = Path(args.csv_path).stem
-    model_name_safe = args.model_name.replace("/", "_")
-    wandb_run_name = f"{model_name_safe}_eval_on_{dataset_name}"
+    model_name = args.ckpt_path.split("/")[-1]
+    wandb_run_name = f"{model_name}"
     
     # Initialize wandb
     wandb.init(
         project="esm2-fitness-eval",
         name=wandb_run_name,
         config={
-            "model_name": args.model_name,
+            "ckpt_path": args.ckpt_path,
             "csv_path": args.csv_path,
-            "dataset": dataset_name,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
@@ -336,8 +334,8 @@ def main():
             "output_dir": args.output_dir,
         },
         tags=["fitness_eval", "dms",
-              f"trained_on_{parse_model_tier(args.model_name)}",
-              f"size_{parse_model_size(args.model_name)}"]
+              f"trained_on_{parse_model_tier(args.ckpt_path)}",
+              f"size_{parse_model_size(args.ckpt_path)}"]
     )
     
     try:
@@ -345,7 +343,7 @@ def main():
         print("=" * 60)
         print("ESM2 Fitness Evaluation (Optimized)")
         print("=" * 60)
-        print(f"Model: {args.model_name}")
+        print(f"Model: {args.ckpt_path}")
         print(f"CSV path: {args.csv_path}")
         print(f"Batch size: {args.batch_size}")
         print(f"Max sequence length: {args.max_seq_len}")
@@ -377,7 +375,7 @@ def main():
         total_start = time.time()
         scored_df, model_load_time, scoring_time = score_dms_dataset(
             dms_df,
-            args.model_name,
+            args.ckpt_path,
             batch_size=args.batch_size,
             aggregate=args.aggregate,
             max_seq_len=args.max_seq_len,
@@ -432,15 +430,14 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
         
         # Save detailed results
-        results_file = f"{args.output_dir}/{dataset_name}_{model_name_safe}_results.csv"
+        results_file = f"{args.output_dir}/{model_name}_results.csv"
         scored_df.to_csv(results_file, index=False)
         print(f"\nDetailed results saved to: {results_file}")
         
         # Save summary
-        summary_file = f"{args.output_dir}/{dataset_name}_{model_name_safe}_summary.csv"
+        summary_file = f"{args.output_dir}/{model_name}_summary.csv"
         summary_df = pd.DataFrame([{
-            'dataset': dataset_name,
-            'model': args.model_name,
+            'ckpt_path': args.ckpt_path,
             'n_mutations': len(scored_df),
             'n_scored': scored_df['esm2_pseudo_ppl'].notna().sum(),
             'total_time_seconds': total_time,
