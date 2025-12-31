@@ -83,109 +83,59 @@ def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None,
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
     """
-    attn_implementation = ""
+    # Parse model size and get corresponding Facebook config
+    model_size = parse_model_size(ckpt_path)
+    facebook_model = FACEBOOK_CONFIG[model_size]
+    print(f"Using custom model {ckpt_path} with architecture from {facebook_model}")
     
-    # Determine the base Facebook model architecture
-    if ckpt_path.startswith("given131/"):
-        # Parse model size and get corresponding Facebook config
-        model_size = parse_model_size(ckpt_path)
-        facebook_model = FACEBOOK_CONFIG[model_size]
-        print(f"Using custom model {ckpt_path} with architecture from {facebook_model}")
-        
-        # Initialize tokenizer and model from Facebook architecture
-        tokenizer = AutoTokenizer.from_pretrained(facebook_model)
-        
-        # Load model with attention implementation
-        model = EsmForMaskedLM.from_pretrained(
-            facebook_model,
-            attn_implementation="flash_attention_2",
-        )
-        
-        # Load custom weights from HuggingFace model
-        try:
-            print(f"Loading custom weights from HuggingFace model: {ckpt_path}")
-            from huggingface_hub import hf_hub_download
+    # Initialize tokenizer and model from Facebook architecture
+    tokenizer = AutoTokenizer.from_pretrained(facebook_model)
+    
+    # Load model with attention implementation
+    model = EsmForMaskedLM.from_pretrained(
+        facebook_model,
+        attn_implementation="flash_attention_2",
+    )
+    
+    # Load custom weights from HuggingFace model
+    try:
+        print(f"Loading custom weights from HuggingFace model: {ckpt_path}")
+        from huggingface_hub import hf_hub_download
 
-            # Download model.bin file
-            model_bin_path = hf_hub_download(repo_id=ckpt_path, filename="model.bin")
-            custom_state_dict = torch.load(model_bin_path, map_location='cpu')
-            
-            # Extract model_state_dict from the ordered_dict
-            if 'model_state_dict' in custom_state_dict:
-                model_weights = custom_state_dict['model_state_dict']
-                print("Found 'model_state_dict' in checkpoint")
-            else:
-                print("Warning: 'model_state_dict' not found, using full state dict")
-                model_weights = custom_state_dict
-            
-            # Load the state dict (strict=False to allow partial loading)
-            missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
-            
-            if missing_keys:
-                print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
-            if unexpected_keys:
-                print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
-                
-            print("Custom weights loaded successfully from HuggingFace")
-        except (ImportError, OSError, RuntimeError) as e:
-            print(f"Warning: Failed to load custom weights from HuggingFace: {e}")
-            print("Continuing with pretrained weights...")
-    
-    else:
-        # Standard Facebook model
-        print(f"Using standard Facebook model: {ckpt_path}")
-        tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+        # Download model.bin file
+        model_bin_path = hf_hub_download(repo_id=ckpt_path, filename="model.bin")
+        custom_state_dict = torch.load(model_bin_path, map_location='cpu')
         
-        # Load model with attention implementation
-        model_kwargs = {}
-        if attn_implementation:
-            model_kwargs["attn_implementation"] = attn_implementation
+        # Extract model_state_dict from the ordered_dict
+        if 'model_state_dict' in custom_state_dict:
+            model_weights = custom_state_dict['model_state_dict']
+            print("Found 'model_state_dict' in checkpoint")
+        else:
+            print("Warning: 'model_state_dict' not found, using full state dict")
+            model_weights = custom_state_dict
         
-        try:
-            model = EsmForMaskedLM.from_pretrained(ckpt_path, **model_kwargs)
-            if attn_implementation:
-                print(f"Model loaded with {attn_implementation} attention")
-        except Exception as e:
-            print(f"Failed to load with {attn_implementation}: {e}")
-            print("Falling back to default attention")
-            model = EsmForMaskedLM.from_pretrained(ckpt_path)
+        # Load the state dict (strict=False to allow partial loading)
+        missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
         
-        # Load additional custom weights if provided
-        if custom_weights_path:
-            print(f"Loading additional custom weights from: {custom_weights_path}")
-            try:
-                custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
-                
-                # Handle different state dict formats
-                if 'model_state_dict' in custom_state_dict:
-                    custom_state_dict = custom_state_dict['model_state_dict']
-                elif 'model' in custom_state_dict:
-                    custom_state_dict = custom_state_dict['model']
-                elif 'state_dict' in custom_state_dict:
-                    custom_state_dict = custom_state_dict['state_dict']
-                
-                # Load the state dict (strict=False to allow partial loading)
-                missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
-                
-                if missing_keys:
-                    print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
-                if unexpected_keys:
-                    print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
-                    
-                print("Additional custom weights loaded successfully")
-            except (ImportError, OSError, RuntimeError) as e:
-                print(f"Warning: Failed to load additional custom weights: {e}")
-                print("Continuing with model weights...")
+        if missing_keys:
+            print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
+        if unexpected_keys:
+            print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
+            
+        print("Custom weights loaded successfully from HuggingFace")
+    except (ImportError, OSError, RuntimeError) as e:
+        print(f"Warning: Failed to load custom weights from HuggingFace: {e}")
+        print("Continuing with pretrained weights...")
     
     model.eval()
+    
     return model, tokenizer
 
 
 def cleanup_gpu_memory():
     """Clean up GPU memory."""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
+    torch.cuda.empty_cache()
+    gc.collect()
 
 
 def setup_model_optimizations(model, device, use_compile: bool = False):
@@ -301,21 +251,15 @@ def compute_batch_pseudo_ppl_from_tensors(
     Uses BF16 precision.
     """
     # Use CUDA stream for async data transfer if available
-    if device.type == 'cuda':
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
-            expanded_attention = expanded_attention.to(device, non_blocking=True)
-            positions_flat = positions_flat.to(device, non_blocking=True)
-            token_targets_flat = token_targets_flat.to(device, non_blocking=True)
-            seq_indices = seq_indices.to(device, non_blocking=True)
-        stream.synchronize()
-    else:
-        expanded_input_ids = expanded_input_ids.to(device)
-        expanded_attention = expanded_attention.to(device)
-        positions_flat = positions_flat.to(device)
-        token_targets_flat = token_targets_flat.to(device)
-        seq_indices = seq_indices.to(device)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
+        expanded_attention = expanded_attention.to(device, non_blocking=True)
+        positions_flat = positions_flat.to(device, non_blocking=True)
+        token_targets_flat = token_targets_flat.to(device, non_blocking=True)
+        seq_indices = seq_indices.to(device, non_blocking=True)
+    stream.synchronize()
+
     
     total_positions = expanded_input_ids.size(0)
     
