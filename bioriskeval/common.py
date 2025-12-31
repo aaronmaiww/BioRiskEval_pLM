@@ -1,18 +1,14 @@
-"""
-Common utility functions for BioRiskEval evaluation scripts.
-"""
-
-from typing import Optional, Tuple, List
-import os
-import torch
-from transformers import AutoTokenizer, EsmForMaskedLM
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
-import gc
 import contextlib
+import gc
 import time
-from tqdm import tqdm
+from typing import List, Optional, Tuple
 
+import flash_attn
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+from transformers import AutoTokenizer, EsmForMaskedLM
 
 FACEBOOK_CONFIG = {
     "8M":   "facebook/esm2_t6_8M_UR50D",
@@ -73,27 +69,6 @@ def parse_model_size(model_name: str) -> str:
         raise ValueError(f"Cannot determine model size from: {model_name}")
 
 
-def get_optimal_batch_size(model_name: str) -> int:
-    """
-    Get optimal batch size based on model size.
-    
-    Args:
-        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
-    Returns:
-        int: Recommended batch size
-    """
-    try:
-        model_size = parse_model_size(model_name)
-        # Optimal batch sizes for 32GB GPU (RTX 5090)
-        batch_size_map = {
-            "8M": 512,
-            "35M": 256,
-            "150M": 128,
-        }
-        return batch_size_map.get(model_size, 256)
-    except ValueError:
-        # Default batch size if cannot determine model size
-        return 256
 
 def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None, 
                     use_flash_attn: bool = True) -> tuple:
@@ -108,17 +83,7 @@ def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None,
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
     """
-    # Check Flash Attention 2 availability
-    attn_implementation = None
-    if use_flash_attn:
-        try:
-            import flash_attn
-            attn_implementation = "flash_attention_2"
-            print(f"Flash Attention 2 available (version {flash_attn.__version__})")
-        except ImportError:
-            print("Flash Attention 2 not installed. Install with: pip install flash-attn --no-build-isolation")
-            print("Falling back to SDPA (still fast on modern GPUs)")
-            attn_implementation = "sdpa"  # Use PyTorch's native SDPA as fallback
+    attn_implementation = ""
     
     # Determine the base Facebook model architecture
     if ckpt_path.startswith("given131/"):
@@ -131,24 +96,16 @@ def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None,
         tokenizer = AutoTokenizer.from_pretrained(facebook_model)
         
         # Load model with attention implementation
-        model_kwargs = {}
-        if attn_implementation:
-            model_kwargs["attn_implementation"] = attn_implementation
-        
-        try:
-            model = EsmForMaskedLM.from_pretrained(facebook_model, **model_kwargs)
-            if attn_implementation:
-                print(f"Model loaded with {attn_implementation} attention")
-        except Exception as e:
-            print(f"Failed to load with {attn_implementation}: {e}")
-            print("Falling back to default attention")
-            model = EsmForMaskedLM.from_pretrained(facebook_model)
+        model = EsmForMaskedLM.from_pretrained(
+            facebook_model,
+            attn_implementation="flash_attention_2",
+        )
         
         # Load custom weights from HuggingFace model
         try:
             print(f"Loading custom weights from HuggingFace model: {ckpt_path}")
             from huggingface_hub import hf_hub_download
-            
+
             # Download model.bin file
             model_bin_path = hf_hub_download(repo_id=ckpt_path, filename="model.bin")
             custom_state_dict = torch.load(model_bin_path, map_location='cpu')
@@ -232,37 +189,24 @@ def cleanup_gpu_memory():
 
 
 def setup_model_optimizations(model, device, use_compile: bool = False):
-    """
-    Apply performance optimizations to the model.
-    
-    Args:
-        model: The ESM2 model
-        device: torch device
-        use_compile: Whether to use torch.compile
-    Returns:
-        Optimized model
-    """
-    # Move model to GPU and optimize
     model = model.to(device)
     
-    # Enable mixed precision and optimizations (BF16 only)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        
-        # Always use BF16
-        model = model.to(dtype=torch.bfloat16)
-        print(f"Model loaded on {device} with BF16 precision")
-        
-        torch.backends.cudnn.benchmark = True
-        
-        # Enable PyTorch native SDPA optimizations (fallback/complement to Flash Attention 2)
-        if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
-            torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(True)
-            torch.backends.cuda.enable_math_sdp(False)  # Disable slow math fallback
-            print("PyTorch SDPA optimizations enabled")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     
+    # Always use BF16
+    model = model.to(dtype=torch.bfloat16)
+    print(f"Model loaded on {device} with BF16 precision")
+    
+    torch.backends.cudnn.benchmark = True
+    
+    # Enable PyTorch native SDPA optimizations (fallback/complement to Flash Attention 2)
+    if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)  # Disable slow math fallback
+        print("PyTorch SDPA optimizations enabled")
+
     # Apply torch.compile for optimized execution (PyTorch 2.0+)
     if use_compile and hasattr(torch, 'compile'):
         print("Compiling model with torch.compile()...")
@@ -568,4 +512,3 @@ def compute_pseudo_ppl_hf_batch(
         scores.extend(group_scores)
     
     return scores
-
