@@ -8,12 +8,10 @@ import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score, matthews_corrcoef, ndcg_score
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import traceback
 import time
-
-# HuggingFace imports for ESM2
-from transformers import AutoTokenizer, EsmForMaskedLM
+import wandb
 
 # Import our scoring functions and model loader
 from bioriskeval.gen.eval_ppl_esm2 import (
@@ -21,6 +19,7 @@ from bioriskeval.gen.eval_ppl_esm2 import (
     load_esm2_model,
     cleanup_gpu_memory
 )
+from bioriskeval.common import parse_model_tier, parse_model_size
 
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -138,7 +137,7 @@ def score_dms_dataset(
     num_prefetch: int = 2,
     use_compile: bool = False,
     use_flash_attn: bool = True,
-):
+) -> Tuple[pd.DataFrame, float, float]:
     """
     Score a DMS dataset using ESM2 pseudo-perplexity with optimized batch processing.
     
@@ -155,7 +154,8 @@ def score_dms_dataset(
         use_flash_attn: Use Flash Attention 2 if available
     
     Returns:
-        pd.DataFrame: DMS dataframe with added 'esm2_pseudo_ppl' column
+        Tuple[pd.DataFrame, float, float]: (DMS dataframe with added 'esm2_pseudo_ppl' column, 
+                                            model_load_time, scoring_time)
     """
     
     # Check required columns
@@ -183,6 +183,26 @@ def score_dms_dataset(
     print(f"Scoring {len(dms_df)} sequences...")
     sequences = dms_df['mutated_sequence'].tolist()
     
+    # Calculate sequence statistics for logging
+    seq_lengths = [len(seq) for seq in sequences]
+    seq_stats = {
+        "total_sequences": len(sequences),
+        "min_length": min(seq_lengths) if seq_lengths else 0,
+        "max_length": max(seq_lengths) if seq_lengths else 0,
+        "mean_length": np.mean(seq_lengths) if seq_lengths else 0,
+        "median_length": np.median(seq_lengths) if seq_lengths else 0,
+    }
+    
+    # Log sequence statistics to wandb
+    wandb.log({
+        "model_load_time": model_load_time,
+        "sequence_stats/total_sequences": seq_stats["total_sequences"],
+        "sequence_stats/min_length": seq_stats["min_length"],
+        "sequence_stats/max_length": seq_stats["max_length"],
+        "sequence_stats/mean_length": seq_stats["mean_length"],
+        "sequence_stats/median_length": seq_stats["median_length"],
+    })
+    
     # Monitor GPU memory before processing
     cleanup_gpu_memory()
     
@@ -201,11 +221,26 @@ def score_dms_dataset(
     scoring_time = time.time() - scoring_start
     print(f"Scoring completed in {scoring_time:.2f}s ({len(sequences)/scoring_time:.2f} sequences/sec)")
     
+    # Log scoring metrics
+    valid_scores = [s for s in all_scores if not np.isnan(s)]
+    if valid_scores:
+        wandb.log({
+            "scoring_metrics/total_scoring_time": scoring_time,
+            "scoring_metrics/sequences_per_second": len(sequences) / scoring_time,
+            "scoring_metrics/mean_score": np.mean(valid_scores),
+            "scoring_metrics/median_score": np.median(valid_scores),
+            "scoring_metrics/std_score": np.std(valid_scores),
+            "scoring_metrics/min_score": np.min(valid_scores),
+            "scoring_metrics/max_score": np.max(valid_scores),
+            "scoring_metrics/valid_scores": len(valid_scores),
+            "scoring_metrics/invalid_scores": len(all_scores) - len(valid_scores),
+        })
+    
     # Add scores to dataframe
     result_df = dms_df.copy()
     result_df['esm2_pseudo_ppl'] = all_scores
     
-    return result_df
+    return result_df, model_load_time, scoring_time
 
 
 def main():
@@ -288,6 +323,32 @@ def main():
     
     args = parser.parse_args()
     
+    # Generate wandb run name
+    dataset_name = Path(args.csv_path).stem
+    model_name_safe = args.model_name.replace("/", "_")
+    wandb_run_name = f"{model_name_safe}_eval_on_{dataset_name}"
+    
+    # Initialize wandb
+    wandb.init(
+        project="esm2-fitness-eval",
+        name=wandb_run_name,
+        config={
+            "model_name": args.model_name,
+            "csv_path": args.csv_path,
+            "dataset": dataset_name,
+            "custom_weights": args.custom_weights,
+            "batch_size": args.batch_size,
+            "max_seq_len": args.max_seq_len,
+            "mask_chunk_size": args.mask_chunk_size,
+            "num_prefetch": args.num_prefetch,
+            "n_samples": args.n_samples,
+            "output_dir": args.output_dir,
+        },
+        tags=["fitness_eval", "dms",
+              f"trained_on_{parse_model_tier(args.model_name)}",
+              f"size_{parse_model_size(args.model_name)}"]
+    )
+    
     try:
         # Print configuration
         print("=" * 60)
@@ -312,14 +373,18 @@ def main():
         load_time = time.time() - load_start
         print(f"Loaded {len(dms_df)} mutations in {load_time:.2f}s")
         
+        # Log data load time
+        wandb.log({"data_load_time": load_time})
+        
         # Sample subset if requested
         if args.n_samples and args.n_samples < len(dms_df):
             print(f"Sampling {args.n_samples} mutations for testing")
             dms_df = dms_df.sample(n=args.n_samples, random_state=42).reset_index(drop=True)
+            wandb.log({"sampled_n_mutations": args.n_samples})
         
         # Score sequences
         total_start = time.time()
-        scored_df = score_dms_dataset(
+        scored_df, model_load_time, scoring_time = score_dms_dataset(
             dms_df,
             args.model_name,
             batch_size=args.batch_size,
@@ -339,6 +404,27 @@ def main():
             scored_df, 'DMS_score', 'esm2_pseudo_ppl', 'DMS_score_bin'
         )
         
+        # Log performance metrics to wandb
+        wandb.log({
+            "performance/spearman": performance['spearman'],
+            "performance/spearman_pvalue": performance['spearman_pvalue'],
+            "performance/auc": performance['auc'],
+            "performance/mcc": performance['mcc'],
+            "performance/ndcg": performance['ndcg'],
+        })
+        
+        # Log final metrics
+        final_metrics = {
+            "final_metrics/total_time": total_time,
+            "final_metrics/model_load_time": model_load_time,
+            "final_metrics/scoring_time": scoring_time,
+            "final_metrics/data_load_time": load_time,
+            "final_metrics/total_mutations": len(scored_df),
+            "final_metrics/n_scored": scored_df['esm2_pseudo_ppl'].notna().sum(),
+            "final_metrics/sequences_per_second": len(scored_df) / total_time,
+        }
+        wandb.log(final_metrics)
+        
         # Print results
         print("\n" + "=" * 60)
         print("Performance Results:")
@@ -356,9 +442,6 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
         
         # Save detailed results
-        dataset_name = Path(args.csv_path).stem
-        model_name_safe = args.model_name.replace("/", "_")
-        
         results_file = f"{args.output_dir}/{dataset_name}_{model_name_safe}_results.csv"
         scored_df.to_csv(results_file, index=False)
         print(f"\nDetailed results saved to: {results_file}")
@@ -384,9 +467,20 @@ def main():
         summary_df.to_csv(summary_file, index=False)
         print(f"Summary saved to: {summary_file}")
         
+        # Log output file info to wandb
+        wandb.log({
+            "output/results_file": results_file,
+            "output/summary_file": summary_file,
+            "output/total_results": len(scored_df)
+        })
+        
+        # Finish wandb run
+        wandb.finish()
+        
     except Exception as e:
         print(f"Error: {e}")
         traceback.print_exc()
+        wandb.finish()
         return 1
     
     return 0

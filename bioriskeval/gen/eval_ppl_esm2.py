@@ -17,6 +17,8 @@ import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
 
+from bioriskeval.common import parse_model_tier, parse_model_size
+
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
@@ -394,48 +396,6 @@ def generate_output_filename(model_name: str, tier: str) -> str:
     # Clean model name for filename (replace / with _)
     clean_model_name = model_name.replace("/", "_")
     return f"output/{clean_model_name}_eval_on_{tier}.txt"
-
-def parse_model_tier(model_name: str) -> str:
-    """
-    Parse model tier from HuggingFace model name.
-    
-    Args:
-        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
-    Returns:
-        str: Tier number (e.g., '1', '2', '3')
-    """
-    if "T1" in model_name:
-        return "1"
-    elif "T2" in model_name:
-        return "2"
-    elif "T5" in model_name:
-        return "5"
-    elif "T6" in model_name:
-        return "6"
-    elif "H" in model_name:
-        return "H"
-    elif "F" in model_name:
-        return "F"
-    else:
-        raise ValueError(f"Cannot determine model tier from: {model_name}")
-
-def parse_model_size(model_name: str) -> str:
-    """
-    Parse model size from HuggingFace model name.
-    
-    Args:
-        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
-    Returns:
-        str: Model size key ("8M", "35M", "150M")
-    """
-    if "8M" in model_name:
-        return "8M"
-    elif "35M" in model_name:
-        return "35M"
-    elif "150M" in model_name:
-        return "150M"
-    else:
-        raise ValueError(f"Cannot determine model size from: {model_name}")
 
 def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None, 
                     use_flash_attn: bool = True) -> tuple:
