@@ -473,7 +473,7 @@ def process_sequence_group_batch(
     )
     
     # Process batches from DataLoader
-    for batch_idx, tensors in enumerate(dataloader):
+    for batch_idx, tensors in enumerate(tqdm(dataloader, desc="Processing batches")):
         expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size = tensors
         
         if expanded_input_ids is None:
