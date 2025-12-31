@@ -38,15 +38,6 @@ FACEBOOK_CONFIG = {
     "150M": "facebook/esm2_t30_150M_UR50D",
 }
 
-def print_gpu_memory_info(stage: str = ""):
-    """Print current GPU memory usage."""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
-        print(f"GPU Memory {stage}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB, Peak={max_allocated:.2f}GB")
-        return allocated, reserved, max_allocated
-    return 0, 0, 0
 
 def cleanup_gpu_memory():
     """Clean up GPU memory."""
@@ -267,9 +258,8 @@ def process_sequence_group_batch(
             scores.extend(batch_scores)
             
             # Clear GPU cache periodically
-            if batch_idx % 4 == 0 and batch_idx > 0:
+            if batch_idx % 8 == 0 and batch_idx > 0:
                 cleanup_gpu_memory()
-                print_gpu_memory_info(f"after batch {batch_idx}")
     
     return scores
 
@@ -644,8 +634,6 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
             torch.backends.cuda.enable_mem_efficient_sdp(True)
             torch.backends.cuda.enable_math_sdp(False)  # Disable slow math fallback
             print("PyTorch SDPA optimizations enabled")
-        
-        print_gpu_memory_info("after model loading")
     
     # Apply torch.compile for optimized execution (PyTorch 2.0+)
     if use_compile and hasattr(torch, 'compile'):
@@ -694,7 +682,6 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     
     # Monitor GPU memory before processing
     cleanup_gpu_memory()
-    print_gpu_memory_info("before processing")
     
     # Compute all scores using optimized batch processing with prefetching (BF16)
     batch_scores = compute_pseudo_ppl_hf_batch(
@@ -725,9 +712,6 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     batch_perplexities = perplexities_array[valid_mask].tolist()
     all_perplexities.extend(batch_perplexities)
     
-    # Monitor GPU memory after processing
-    allocated, reserved, peak = print_gpu_memory_info("after processing")
-    
     # Log batch metrics
     if batch_perplexities:
         wandb.log({
@@ -735,9 +719,6 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
             "batch_metrics/sequences_per_second": len(sequences) / batch_time,
             "batch_metrics/mean_perplexity": np.mean(batch_perplexities),
             "batch_metrics/median_perplexity": np.median(batch_perplexities),
-            "batch_metrics/gpu_memory_peak_gb": peak,
-            "batch_metrics/gpu_memory_allocated_gb": allocated,
-            "batch_metrics/gpu_memory_reserved_gb": reserved,
         })
 
     # Calculate final statistics
