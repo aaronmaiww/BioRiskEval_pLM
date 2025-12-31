@@ -16,10 +16,9 @@ import wandb
 # Import our scoring functions and model loader
 from bioriskeval.gen.eval_ppl_esm2 import (
     compute_pseudo_ppl_hf_batch,
-    load_esm2_model,
     cleanup_gpu_memory
 )
-from bioriskeval.common import parse_model_tier, parse_model_size
+from bioriskeval.common import parse_model_tier, parse_model_size, load_esm2_model
 
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -130,7 +129,6 @@ def score_dms_dataset(
     dms_df: pd.DataFrame,
     model_name: str,
     batch_size: int = 256,
-    custom_weights_path: Optional[str] = None,
     aggregate: str = "sum",
     max_seq_len: int = 1024,
     mask_chunk_size: int = 512,
@@ -143,9 +141,8 @@ def score_dms_dataset(
     
     Args:
         dms_df: DataFrame with DMS data
-        model_name: HuggingFace model name
+        model_name: HuggingFace model name or path to local weights file (.pt or .pth)
         batch_size: Batch size for processing
-        custom_weights_path: Path to custom weights file
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
         max_seq_len: Maximum sequence length
         mask_chunk_size: Number of masked positions evaluated per forward
@@ -169,7 +166,6 @@ def score_dms_dataset(
     model_load_start = time.time()
     model, tokenizer = load_esm2_model(
         ckpt_path=model_name,
-        custom_weights_path=custom_weights_path,
         use_flash_attn=use_flash_attn
     )
     
@@ -257,7 +253,7 @@ def main():
         "--model-name", 
         type=str,
         default="facebook/esm2_t6_8M_UR50D",
-        help="HuggingFace ESM2 model name. Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'given131/35M_H', 'given131/150M_F'."
+        help="HuggingFace ESM2 model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'."
     )
     parser.add_argument(
         "--batch-size",
@@ -314,12 +310,6 @@ def main():
         default=None,
         help="Number of samples to process (default: all)"
     )
-    parser.add_argument(
-        "--custom-weights",
-        type=str,
-        default=None,
-        help="Path to custom weights file (.pt or .pth) to load into the model."
-    )
     
     args = parser.parse_args()
     
@@ -336,7 +326,6 @@ def main():
             "model_name": args.model_name,
             "csv_path": args.csv_path,
             "dataset": dataset_name,
-            "custom_weights": args.custom_weights,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
@@ -388,7 +377,6 @@ def main():
             dms_df,
             args.model_name,
             batch_size=args.batch_size,
-            custom_weights_path=args.custom_weights,
             aggregate=args.aggregate,
             max_seq_len=args.max_seq_len,
             mask_chunk_size=args.mask_chunk_size,

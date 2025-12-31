@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
 
-from bioriskeval.common import parse_model_tier, parse_model_size
+from bioriskeval.common import parse_model_tier, parse_model_size, load_esm2_model
 
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -34,11 +34,6 @@ MODELS = [
     "given131/150M_H",  "given131/150M_F",
 ]
 
-FACEBOOK_CONFIG = {
-    "8M":   "facebook/esm2_t6_8M_UR50D",
-    "35M":  "facebook/esm2_t12_35M_UR50D",
-    "150M": "facebook/esm2_t30_150M_UR50D",
-}
 
 
 def cleanup_gpu_memory():
@@ -397,134 +392,6 @@ def generate_output_filename(model_name: str, tier: str) -> str:
     clean_model_name = model_name.replace("/", "_")
     return f"output/{clean_model_name}_eval_on_{tier}.txt"
 
-def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None, 
-                    use_flash_attn: bool = True) -> tuple:
-    """
-    Load ESM2 model using HuggingFace transformers.
-    
-    Args:
-        ckpt_path (str): HuggingFace model name (e.g., "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D")
-        custom_weights_path (str, optional): Path to custom weights file (.pt or .pth)
-        use_flash_attn (bool): Use Flash Attention 2 if available (requires flash-attn package)
-    Returns:
-        model: HuggingFace EsmForMaskedLM model
-        tokenizer: HuggingFace ESM2 tokenizer
-    """
-    # Check Flash Attention 2 availability
-    attn_implementation = None
-    if use_flash_attn:
-        try:
-            import flash_attn
-            attn_implementation = "flash_attention_2"
-            print(f"Flash Attention 2 available (version {flash_attn.__version__})")
-        except ImportError:
-            print("Flash Attention 2 not installed. Install with: pip install flash-attn --no-build-isolation")
-            print("Falling back to SDPA (still fast on modern GPUs)")
-            attn_implementation = "sdpa"  # Use PyTorch's native SDPA as fallback
-    
-    # Determine the base Facebook model architecture
-    if ckpt_path.startswith("given131/"):
-        # Parse model size and get corresponding Facebook config
-        model_size = parse_model_size(ckpt_path)
-        facebook_model = FACEBOOK_CONFIG[model_size]
-        print(f"Using custom model {ckpt_path} with architecture from {facebook_model}")
-        
-        # Initialize tokenizer and model from Facebook architecture
-        tokenizer = AutoTokenizer.from_pretrained(facebook_model)
-        
-        # Load model with attention implementation
-        model_kwargs = {}
-        if attn_implementation:
-            model_kwargs["attn_implementation"] = attn_implementation
-        
-        try:
-            model = EsmForMaskedLM.from_pretrained(facebook_model, **model_kwargs)
-            if attn_implementation:
-                print(f"Model loaded with {attn_implementation} attention")
-        except Exception as e:
-            print(f"Failed to load with {attn_implementation}: {e}")
-            print("Falling back to default attention")
-            model = EsmForMaskedLM.from_pretrained(facebook_model)
-        
-        # Load custom weights from HuggingFace model
-        try:
-            print(f"Loading custom weights from HuggingFace model: {ckpt_path}")
-            from huggingface_hub import hf_hub_download
-            
-            # Download model.bin file
-            model_bin_path = hf_hub_download(repo_id=ckpt_path, filename="model.bin")
-            custom_state_dict = torch.load(model_bin_path, map_location='cpu')
-            
-            # Extract model_state_dict from the ordered_dict
-            if 'model_state_dict' in custom_state_dict:
-                model_weights = custom_state_dict['model_state_dict']
-                print("Found 'model_state_dict' in checkpoint")
-            else:
-                print("Warning: 'model_state_dict' not found, using full state dict")
-                model_weights = custom_state_dict
-            
-            # Load the state dict (strict=False to allow partial loading)
-            missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
-            
-            if missing_keys:
-                print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
-            if unexpected_keys:
-                print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
-                
-            print("Custom weights loaded successfully from HuggingFace")
-        except (ImportError, OSError, RuntimeError) as e:
-            print(f"Warning: Failed to load custom weights from HuggingFace: {e}")
-            print("Continuing with pretrained weights...")
-    
-    else:
-        # Standard Facebook model
-        print(f"Using standard Facebook model: {ckpt_path}")
-        tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-        
-        # Load model with attention implementation
-        model_kwargs = {}
-        if attn_implementation:
-            model_kwargs["attn_implementation"] = attn_implementation
-        
-        try:
-            model = EsmForMaskedLM.from_pretrained(ckpt_path, **model_kwargs)
-            if attn_implementation:
-                print(f"Model loaded with {attn_implementation} attention")
-        except Exception as e:
-            print(f"Failed to load with {attn_implementation}: {e}")
-            print("Falling back to default attention")
-            model = EsmForMaskedLM.from_pretrained(ckpt_path)
-        
-        # Load additional custom weights if provided
-        if custom_weights_path:
-            print(f"Loading additional custom weights from: {custom_weights_path}")
-            try:
-                custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
-                
-                # Handle different state dict formats
-                if 'model_state_dict' in custom_state_dict:
-                    custom_state_dict = custom_state_dict['model_state_dict']
-                elif 'model' in custom_state_dict:
-                    custom_state_dict = custom_state_dict['model']
-                elif 'state_dict' in custom_state_dict:
-                    custom_state_dict = custom_state_dict['state_dict']
-                
-                # Load the state dict (strict=False to allow partial loading)
-                missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
-                
-                if missing_keys:
-                    print(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
-                if unexpected_keys:
-                    print(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
-                    
-                print("Additional custom weights loaded successfully")
-            except (ImportError, OSError, RuntimeError) as e:
-                print(f"Warning: Failed to load additional custom weights: {e}")
-                print("Continuing with model weights...")
-    
-    model.eval()
-    return model, tokenizer
-
 def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
     """
     Load sequences from a FASTA file.
@@ -543,7 +410,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
 
 
 def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
-                  batch_size: int = 256, aggregate: str = "mean", custom_weights_path: Optional[str] = None,
+                  batch_size: int = 256, aggregate: str = "mean",
                   max_seq_len: int = 1024, mask_chunk_size: int = 512,
                   num_prefetch: int = 2, use_compile: bool = False, 
                   use_flash_attn: bool = True) -> Dict[str, float]:
@@ -552,7 +419,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
 
     Args:
         fasta_path (str): Path to the input FASTA file.
-        ckpt_path (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D")
+        ckpt_path (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D") or path to local weights file (.pt or .pth)
         batch_size (int): Batch size for processing sequences.
         aggregate (str): "sum" for total log-likelihood, "mean" for average log-likelihood
         mask_chunk_size (int): Number of masked positions evaluated per forward.
@@ -569,7 +436,6 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     model_load_start = time.time()
     model, tokenizer = load_esm2_model(
         ckpt_path=ckpt_path, 
-        custom_weights_path=custom_weights_path,
         use_flash_attn=use_flash_attn
     )
     
@@ -724,13 +590,7 @@ def main():
         "--ckpt-path",
         type=str,
         default="facebook/esm2_t6_8M_UR50D",
-        help="HuggingFace model name. Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'given131/35M_H', 'given131/150M_F'.",
-    )
-    parser.add_argument(
-        "--custom-weights",
-        type=str,
-        default=None,
-        help="Path to custom weights file (.pt or .pth) to load into the model.",
+        help="HuggingFace model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'.",
     )
     parser.add_argument(
         "--aggregate",
@@ -806,7 +666,6 @@ def main():
         config={
             "model_ckpt": args.ckpt_path,
             "eval_tier": args.tier,
-            "custom_weights": args.custom_weights,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
@@ -841,7 +700,6 @@ def main():
         ckpt_path=args.ckpt_path,
         batch_size=args.batch_size,
         aggregate=args.aggregate,
-        custom_weights_path=args.custom_weights,
         max_seq_len=args.max_seq_len,
         mask_chunk_size=args.mask_chunk_size,
         num_prefetch=args.num_prefetch,
@@ -857,7 +715,6 @@ def main():
     config_info = {
         "timestamp": timestamp,
         "model": args.ckpt_path,
-        "custom_weights": args.custom_weights or "None",
         "tier": args.tier,
         "fasta_file": fasta_path,
         "batch_size": args.batch_size,
