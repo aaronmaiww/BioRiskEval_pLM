@@ -7,18 +7,20 @@ import numpy as np
 import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score, matthews_corrcoef, ndcg_score
-from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 import traceback
 import time
 import wandb
 
 # Import our scoring functions and model loader
-from bioriskeval.gen.eval_ppl_esm2 import (
+from bioriskeval.common import (
+    parse_model_tier, 
+    parse_model_size, 
+    load_esm2_model,
     compute_pseudo_ppl_hf_batch,
-    cleanup_gpu_memory
+    cleanup_gpu_memory,
+    setup_model_optimizations,
 )
-from bioriskeval.common import parse_model_tier, parse_model_size, load_esm2_model, get_optimal_batch_size
 
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -79,50 +81,6 @@ def get_performance_results(merged_df, DMS_score_column, model_score_column, DMS
         'auc': auc,
         'mcc': mcc
     }
-
-
-def setup_model_optimizations(model, device, use_compile: bool = False):
-    """
-    Apply performance optimizations to the model.
-    
-    Args:
-        model: The ESM2 model
-        device: torch device
-        use_compile: Whether to use torch.compile
-    Returns:
-        Optimized model
-    """
-    # Move model to GPU and optimize
-    model = model.to(device)
-    
-    # Enable mixed precision and optimizations (BF16 only)
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        
-        # Always use BF16
-        model = model.to(dtype=torch.bfloat16)
-        print(f"Model loaded on {device} with BF16 precision")
-        
-        torch.backends.cudnn.benchmark = True
-        
-        # Enable PyTorch native SDPA optimizations (fallback/complement to Flash Attention 2)
-        if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
-            torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(True)
-            torch.backends.cuda.enable_math_sdp(False)  # Disable slow math fallback
-            print("PyTorch SDPA optimizations enabled")
-    
-    # Apply torch.compile for optimized execution (PyTorch 2.0+)
-    if use_compile and hasattr(torch, 'compile'):
-        print("Compiling model with torch.compile()...")
-        compile_start = time.time()
-        # Use mode="default" instead of "reduce-overhead" to avoid CUDA Graph issues
-        # with ESM's rotary embeddings which have dynamic cached tensors
-        model = torch.compile(model, mode="default", fullgraph=False, dynamic=True)
-        print(f"Model compiled in {time.time() - compile_start:.2f}s")
-    
-    return model
 
 
 def score_dms_dataset(
