@@ -282,7 +282,6 @@ def compute_batch_pseudo_ppl_from_tensors(
             torch.compiler.cudagraph_mark_step_begin()
 
         with torch.inference_mode(), autocast_context:
-            print("batch size: ", chunk_inputs.size(0))
             logits = model(chunk_inputs, attention_mask=chunk_attention).logits
             log_probs = F.log_softmax(logits.float(), dim=-1)
             token_log_probs = log_probs[
