@@ -70,15 +70,12 @@ def parse_model_size(model_name: str) -> str:
 
 
 
-def load_esm2_model(ckpt_path: str, custom_weights_path: Optional[str] = None, 
-                    use_flash_attn: bool = True) -> tuple:
+def load_esm2_model(ckpt_path: str) -> tuple:
     """
     Load ESM2 model using HuggingFace transformers.
     
     Args:
         ckpt_path (str): HuggingFace model name (e.g., "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D")
-        custom_weights_path (str, optional): Path to custom weights file (.pt or .pth)
-        use_flash_attn (bool): Use Flash Attention 2 if available (requires flash-attn package)
     Returns:
         model: HuggingFace EsmForMaskedLM model
         tokenizer: HuggingFace ESM2 tokenizer
@@ -259,7 +256,6 @@ def compute_batch_pseudo_ppl_from_tensors(
         token_targets_flat = token_targets_flat.to(device, non_blocking=True)
         seq_indices = seq_indices.to(device, non_blocking=True)
     stream.synchronize()
-
     
     total_positions = expanded_input_ids.size(0)
     

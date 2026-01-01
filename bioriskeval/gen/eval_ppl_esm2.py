@@ -106,10 +106,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     # Load ESM2 model using HuggingFace
     print("Loading model...")
     model_load_start = time.time()
-    model, tokenizer = load_esm2_model(
-        ckpt_path=ckpt_path, 
-        use_flash_attn=use_flash_attn
-    )
+    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path)
     
     # Apply optimizations
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
