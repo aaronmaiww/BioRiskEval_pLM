@@ -122,10 +122,7 @@ def score_dms_dataset(
     # Load model using optimized loader
     print("Loading model...")
     model_load_start = time.time()
-    model, tokenizer = load_esm2_model(
-        ckpt_path=ckpt_path,
-        use_flash_attn=use_flash_attn
-    )
+    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path)
     
     # Apply optimizations
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
