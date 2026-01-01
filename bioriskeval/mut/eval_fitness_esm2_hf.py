@@ -89,7 +89,7 @@ def score_dms_dataset(
     batch_size: int = 256,
     aggregate: str = "sum",
     max_seq_len: int = 1024,
-    mask_chunk_size: int = 512,
+    mask_chunk_size: int = 1024,
     num_workers: int = 4,
     use_compile: bool = False,
     use_flash_attn: bool = True,

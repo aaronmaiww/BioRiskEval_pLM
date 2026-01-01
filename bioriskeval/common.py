@@ -1,9 +1,45 @@
+"""
+Common utilities for BioRiskEval including model loading, sequence processing, and profiling.
+
+Profiling Usage:
+    # Enable profiling to identify performance bottlenecks
+    scores = compute_pseudo_ppl_hf_batch(
+        sequences=my_sequences,
+        model=model,
+        tokenizer=tokenizer,
+        enable_profiling=True,  # Add this line
+    )
+    
+    # Output will show time breakdown like:
+    # 4d_model_forward         78.5%  <- Model inference (usually the bottleneck)
+    # 4e_log_prob_computation  13.3%  <- Post-processing
+    # 4a_cpu_to_gpu_transfer    5.3%  <- Data transfer
+    # 3_dataloader_iteration    2.0%  <- CPU preprocessing
+    # ...
+
+Manual profiling:
+    from bioriskeval.common import PerformanceProfiler, CUDATimer
+    
+    profiler = PerformanceProfiler()
+    
+    with profiler.profile("my_section"):
+        # code to profile
+        pass
+    
+    profiler.print_summary()
+    
+    # Or use CUDA timer for GPU operations
+    with CUDATimer("gpu_operation"):
+        result = my_gpu_function()
+"""
+
 import contextlib
 import gc
 import time
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
-import flash_attn
+import flash_attn  # noqa: F401 - Import to ensure Flash Attention is available
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -15,6 +51,150 @@ FACEBOOK_CONFIG = {
     "35M":  "facebook/esm2_t12_35M_UR50D",
     "150M": "facebook/esm2_t30_150M_UR50D",
 }
+
+
+# ============================================================================
+# Profiling Utilities
+# ============================================================================
+
+class CUDATimer:
+    """
+    High-precision CUDA timer using CUDA events.
+    More accurate than time.time() for GPU operations.
+    """
+    
+    def __init__(self, name: str = "", enabled: bool = True):
+        self.name = name
+        self.enabled = enabled and torch.cuda.is_available()
+        self.start_event = None
+        self.end_event = None
+        
+    def __enter__(self):
+        if self.enabled:
+            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.end_event = torch.cuda.Event(enable_timing=True)
+            self.start_event.record()
+        return self
+    
+    def __exit__(self, *args):
+        if self.enabled:
+            self.end_event.record()
+            torch.cuda.synchronize()
+            elapsed = self.start_event.elapsed_time(self.end_event)
+            if self.name:
+                print(f"[CUDA Timer] {self.name}: {elapsed:.2f}ms")
+    
+    def elapsed_ms(self) -> float:
+        """Get elapsed time in milliseconds."""
+        if self.enabled and self.start_event and self.end_event:
+            torch.cuda.synchronize()
+            return self.start_event.elapsed_time(self.end_event)
+        return 0.0
+
+
+class PerformanceProfiler:
+    """
+    Lightweight profiler that tracks timing for different code sections.
+    Supports both CPU and GPU timing with CUDA events.
+    
+    Usage:
+        profiler = PerformanceProfiler()
+        
+        with profiler.profile("section_name"):
+            # code to profile
+            pass
+        
+        profiler.print_summary()
+    """
+    
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self.timings: Dict[str, List[float]] = defaultdict(list)
+        self.use_cuda = torch.cuda.is_available()
+        
+    @contextlib.contextmanager
+    def profile(self, name: str):
+        """Context manager for profiling a code section."""
+        if not self.enabled:
+            yield
+            return
+            
+        if self.use_cuda:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            
+            try:
+                yield
+            finally:
+                end_event.record()
+                torch.cuda.synchronize()
+                elapsed = start_event.elapsed_time(end_event)
+                self.timings[name].append(elapsed)
+        else:
+            start = time.perf_counter()
+            try:
+                yield
+            finally:
+                elapsed = (time.perf_counter() - start) * 1000  # Convert to ms
+                self.timings[name].append(elapsed)
+    
+    def get_summary(self) -> str:
+        """Generate a formatted summary of all profiled sections."""
+        if not self.timings:
+            return "No profiling data collected."
+        
+        lines = ["=" * 80, "Performance Profiling Summary", "=" * 80]
+        
+        # Calculate statistics for each section
+        results = []
+        total_time = 0.0
+        
+        for name, times in self.timings.items():
+            total = sum(times)
+            count = len(times)
+            avg = total / count
+            
+            results.append({
+                'name': name,
+                'total': total,
+                'count': count,
+                'avg': avg,
+            })
+            total_time += total
+        
+        # Sort by total time (descending)
+        results.sort(key=lambda x: x['total'], reverse=True)
+        
+        # Print table header
+        lines.append(f"{'Section':<40} {'Total (ms)':<12} {'Avg (ms)':<12} {'Count':<8} {'% Total':<8}")
+        lines.append("-" * 80)
+        
+        # Print each section
+        for r in results:
+            pct = (r['total'] / total_time * 100) if total_time > 0 else 0
+            lines.append(
+                f"{r['name']:<40} {r['total']:>11.2f} {r['avg']:>11.2f} {r['count']:>7} {pct:>7.1f}%"
+            )
+        
+        lines.append("-" * 80)
+        lines.append(f"{'TOTAL':<40} {total_time:>11.2f}")
+        lines.append("=" * 80)
+        
+        return "\n".join(lines)
+    
+    def reset(self):
+        """Clear all collected timing data."""
+        self.timings.clear()
+    
+    def print_summary(self):
+        """Print the profiling summary."""
+        print(self.get_summary())
+
+
+# ============================================================================
+# Model Loading and Setup
+# ============================================================================
 
 
 def parse_model_tier(model_name: str) -> str:
@@ -240,6 +420,7 @@ def compute_batch_pseudo_ppl_from_tensors(
     aggregate: str,
     device,
     mask_chunk_size: int,
+    profiler: Optional[PerformanceProfiler] = None,
 ) -> List[float]:
     """
     Compute pseudo-perplexity from pre-prepared tensors.
@@ -247,21 +428,23 @@ def compute_batch_pseudo_ppl_from_tensors(
     All GPU operations complete before any CPU transfer to minimize GPU-CPU overhead.
     Uses BF16 precision.
     """
-    # Use CUDA stream for async data transfer if available
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
-        expanded_attention = expanded_attention.to(device, non_blocking=True)
-        positions_flat = positions_flat.to(device, non_blocking=True)
-        token_targets_flat = token_targets_flat.to(device, non_blocking=True)
-        seq_indices = seq_indices.to(device, non_blocking=True)
-    stream.synchronize()
+    with (profiler.profile("4a_cpu_to_gpu_transfer") if profiler else contextlib.nullcontext()):
+        # Use CUDA stream for async data transfer if available
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            expanded_input_ids = expanded_input_ids.to(device, non_blocking=True)
+            expanded_attention = expanded_attention.to(device, non_blocking=True)
+            positions_flat = positions_flat.to(device, non_blocking=True)
+            token_targets_flat = token_targets_flat.to(device, non_blocking=True)
+            seq_indices = seq_indices.to(device, non_blocking=True)
+        stream.synchronize()
     
-    total_positions = expanded_input_ids.size(0)
-    
-    # Pre-allocate result tensors on GPU
-    log_sums = torch.zeros(batch_size, device=device, dtype=torch.float32)
-    counts = torch.zeros(batch_size, device=device, dtype=torch.float32)
+    with (profiler.profile("4b_tensor_allocation") if profiler else contextlib.nullcontext()):
+        total_positions = expanded_input_ids.size(0)
+        
+        # Pre-allocate result tensors on GPU
+        log_sums = torch.zeros(batch_size, device=device, dtype=torch.float32)
+        counts = torch.zeros(batch_size, device=device, dtype=torch.float32)
 
     # Use BF16 autocast
     autocast_enabled = device.type == "cuda"
@@ -269,46 +452,54 @@ def compute_batch_pseudo_ppl_from_tensors(
 
     # Process all chunks - stay on GPU
     for chunk_start in tqdm(range(0, total_positions, mask_chunk_size)):
-        chunk_end = min(chunk_start + mask_chunk_size, total_positions)
-        chunk_inputs = expanded_input_ids[chunk_start:chunk_end]
-        chunk_attention = expanded_attention[chunk_start:chunk_end]
-        chunk_positions = positions_flat[chunk_start:chunk_end]
-        chunk_targets = token_targets_flat[chunk_start:chunk_end]
-        chunk_seq_indices = seq_indices[chunk_start:chunk_end]
-        chunk_batch = chunk_inputs.size(0)
+        with (profiler.profile("4c_chunk_slicing") if profiler else contextlib.nullcontext()):
+            chunk_end = min(chunk_start + mask_chunk_size, total_positions)
+            chunk_inputs = expanded_input_ids[chunk_start:chunk_end]
+            chunk_attention = expanded_attention[chunk_start:chunk_end]
+            chunk_positions = positions_flat[chunk_start:chunk_end]
+            chunk_targets = token_targets_flat[chunk_start:chunk_end]
+            chunk_seq_indices = seq_indices[chunk_start:chunk_end]
+            chunk_batch = chunk_inputs.size(0)
 
-        # Mark step for CUDA graph compatibility with torch.compile
-        if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
-            torch.compiler.cudagraph_mark_step_begin()
+            # Mark step for CUDA graph compatibility with torch.compile
+            if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                torch.compiler.cudagraph_mark_step_begin()
 
-        with torch.inference_mode(), autocast_context:
-            logits = model(chunk_inputs, attention_mask=chunk_attention).logits
-            log_probs = F.log_softmax(logits.float(), dim=-1)
-            token_log_probs = log_probs[
-                torch.arange(chunk_batch, device=device),
-                chunk_positions,
-                chunk_targets
-            ]
+        with (profiler.profile("4d_model_forward") if profiler else contextlib.nullcontext()):
+            with torch.inference_mode(), autocast_context:
+                logits = model(chunk_inputs, attention_mask=chunk_attention).logits
+        
+        with (profiler.profile("4e_log_prob_computation") if profiler else contextlib.nullcontext()):
+            with torch.inference_mode(), autocast_context:
+                log_probs = F.log_softmax(logits.float(), dim=-1)
+                token_log_probs = log_probs[
+                    torch.arange(chunk_batch, device=device),
+                    chunk_positions,
+                    chunk_targets
+                ]
 
-        log_sums.scatter_add_(0, chunk_seq_indices, token_log_probs)
-        counts.scatter_add_(0, chunk_seq_indices, torch.ones_like(token_log_probs))
+        with (profiler.profile("4f_scatter_accumulation") if profiler else contextlib.nullcontext()):
+            log_sums.scatter_add_(0, chunk_seq_indices, token_log_probs)
+            counts.scatter_add_(0, chunk_seq_indices, torch.ones_like(token_log_probs))
     
-    # Finish ALL GPU computation before transferring to CPU
-    with torch.inference_mode():
-        if aggregate == "sum":
-            results_tensor = log_sums
-        elif aggregate == "mean":
-            # mean: divide on GPU, handle division by zero
-            results_tensor = torch.where(
-                counts > 0,
-                log_sums / counts,
-                torch.tensor(float('nan'), device=device, dtype=log_sums.dtype)
-            )
-        else:
-            raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
+    with (profiler.profile("4g_final_aggregation") if profiler else contextlib.nullcontext()):
+        # Finish ALL GPU computation before transferring to CPU
+        with torch.inference_mode():
+            if aggregate == "sum":
+                results_tensor = log_sums
+            elif aggregate == "mean":
+                # mean: divide on GPU, handle division by zero
+                results_tensor = torch.where(
+                    counts > 0,
+                    log_sums / counts,
+                    torch.tensor(float('nan'), device=device, dtype=log_sums.dtype)
+                )
+            else:
+                raise ValueError(f"aggregate must be 'sum' or 'mean', got {aggregate}")
     
-    # Single bulk GPU->CPU transfer
-    scores = results_tensor.cpu().numpy().tolist()
+    with (profiler.profile("4h_gpu_to_cpu_transfer") if profiler else contextlib.nullcontext()):
+        # Single bulk GPU->CPU transfer
+        scores = results_tensor.cpu().numpy().tolist()
     
     return scores
 
@@ -323,6 +514,8 @@ def process_sequence_group_batch(
     device,
     mask_chunk_size: int,
     num_workers: int = 4,
+    enable_profiling: bool = False,
+    profiler: Optional[PerformanceProfiler] = None,
 ) -> List[float]:
     """
     Process a group of similar-length sequences in batches using DataLoader.
@@ -331,57 +524,72 @@ def process_sequence_group_batch(
     
     Args:
         num_workers: Number of workers for DataLoader prefetching (default 4)
+        enable_profiling: Enable detailed performance profiling (default False)
+        profiler: Optional PerformanceProfiler instance for collecting metrics
     """
     scores = []
     
     if not sequences:
         return scores
     
-    # Create dataset and dataloader
-    dataset = ProteinSequenceDataset(sequences)
+    # Initialize profiler if requested
+    if enable_profiling and profiler is None:
+        profiler = PerformanceProfiler(enabled=True)
     
-    # Create collate function with tokenizer and max_seq_len bound
-    def collate_fn(batch):
-        return collate_batch_tensors(batch, tokenizer, max_seq_len)
+    with (profiler.profile("1_dataset_creation") if profiler else contextlib.nullcontext()):
+        # Create dataset and dataloader
+        dataset = ProteinSequenceDataset(sequences)
+        
+        # Create collate function with tokenizer and max_seq_len bound
+        def collate_fn(batch):
+            return collate_batch_tensors(batch, tokenizer, max_seq_len)
     
-    # DataLoader handles prefetching automatically with num_workers
-    dataloader = DataLoader(
-        dataset,
-        batch_size=max_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == 'cuda'),
-        collate_fn=collate_fn,
-        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch 2 batches per worker
-        persistent_workers=True if num_workers > 0 else False,
-    )
+    with (profiler.profile("2_dataloader_creation") if profiler else contextlib.nullcontext()):
+        # DataLoader handles prefetching automatically with num_workers
+        dataloader = DataLoader(
+            dataset,
+            batch_size=max_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == 'cuda'),
+            collate_fn=collate_fn,
+            prefetch_factor=2 if num_workers > 0 else None,  # Prefetch 2 batches per worker
+            persistent_workers=True if num_workers > 0 else False,
+        )
     
     # Process batches from DataLoader
     for batch_idx, tensors in enumerate(dataloader):
-        expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size = tensors
+        with (profiler.profile("3_dataloader_iteration") if profiler else contextlib.nullcontext()):
+            expanded_input_ids, expanded_attention, positions_flat, token_targets_flat, seq_indices, batch_size = tensors
         
         if expanded_input_ids is None:
             # Empty batch
             scores.extend([float("nan")] * batch_size)
             continue
         
-        batch_scores = compute_batch_pseudo_ppl_from_tensors(
-            expanded_input_ids,
-            expanded_attention,
-            positions_flat,
-            token_targets_flat,
-            seq_indices,
-            batch_size,
-            model,
-            aggregate,
-            device,
-            mask_chunk_size,
-        )
+        with (profiler.profile("4_compute_batch") if profiler else contextlib.nullcontext()):
+            batch_scores = compute_batch_pseudo_ppl_from_tensors(
+                expanded_input_ids,
+                expanded_attention,
+                positions_flat,
+                token_targets_flat,
+                seq_indices,
+                batch_size,
+                model,
+                aggregate,
+                device,
+                mask_chunk_size,
+                profiler=profiler,
+            )
         scores.extend(batch_scores)
         
         # Clear GPU cache periodically
         if batch_idx % 8 == 0 and batch_idx > 0:
-            cleanup_gpu_memory()
+            with (profiler.profile("5_memory_cleanup") if profiler else contextlib.nullcontext()):
+                cleanup_gpu_memory()
+    
+    if profiler and enable_profiling:
+        profiler.print_summary()
     
     return scores
 
@@ -395,6 +603,7 @@ def compute_pseudo_ppl_hf_batch(
     max_seq_len: int = 1024,
     mask_chunk_size: int = 512,
     num_workers: int = 4,
+    enable_profiling: bool = False,
 ) -> List[float]:
     """
     Compute pseudo-perplexity for sequences using HuggingFace ESM2 model with optimized batching.
@@ -410,30 +619,37 @@ def compute_pseudo_ppl_hf_batch(
         max_seq_len: Maximum sequence length
         mask_chunk_size: Number of masked positions evaluated per forward pass
         num_workers: Number of DataLoader workers for prefetching (default 4)
+        enable_profiling: Enable detailed performance profiling (default False)
     Returns:
         List of perplexity scores
     """
     device = next(model.parameters()).device
     scores = []
     
-    # Group sequences by similar lengths for efficient batching
-    seq_groups = []
-    current_group = []
-    current_length = 0
+    # Initialize profiler if requested
+    profiler = None
+    if enable_profiling:
+        profiler = PerformanceProfiler(enabled=True)
     
-    for seq in sequences:
-        seq_len = min(len(seq) + 2, max_seq_len)  # +2 for special tokens
-        if not current_group or abs(seq_len - current_length) <= 50:  # Allow 50 token difference
-            current_group.append(seq)
-            current_length = seq_len
-        else:
-            if current_group:
-                seq_groups.append(current_group)
-            current_group = [seq]
-            current_length = seq_len
-    
-    if current_group:
-        seq_groups.append(current_group)
+    with (profiler.profile("0_sequence_grouping") if profiler else contextlib.nullcontext()):
+        # Group sequences by similar lengths for efficient batching
+        seq_groups = []
+        current_group = []
+        current_length = 0
+        
+        for seq in sequences:
+            seq_len = min(len(seq) + 2, max_seq_len)  # +2 for special tokens
+            if not current_group or abs(seq_len - current_length) <= 50:  # Allow 50 token difference
+                current_group.append(seq)
+                current_length = seq_len
+            else:
+                if current_group:
+                    seq_groups.append(current_group)
+                current_group = [seq]
+                current_length = seq_len
+        
+        if current_group:
+            seq_groups.append(current_group)
     
     print(f"Processing {len(sequences)} sequences in {len(seq_groups)} length-grouped batches")
     
@@ -448,6 +664,8 @@ def compute_pseudo_ppl_hf_batch(
             device,
             mask_chunk_size,
             num_workers,
+            enable_profiling=enable_profiling,
+            profiler=profiler,
         )
         scores.extend(group_scores)
     
