@@ -81,7 +81,7 @@ def extract_representations_batch(sequences: List[str],
                     last_token_reprs.append(layer_hidden[i, last_idx, :])
                 
                 layer_repr = torch.stack(last_token_reprs)  # (batch_size, hidden_dim)
-                representations[layer_num] = layer_repr.cpu().numpy()
+                representations[layer_num] = layer_repr.to(dtype=torch.float32).cpu().numpy()
             else:
                 logger.warning(f"Layer {layer_num} not available in model (only {len(hidden_states)} layers)")
     
