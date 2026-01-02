@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Tuple, cast, Optional
 
+from bioriskeval.common import parse_model_tier, parse_model_size
+
 """
 This script trains a linear regression probe (single linear layer) on a dataset
 with continuous labels.
@@ -179,6 +181,7 @@ if __name__ == "__main__":
     parser.add_argument("--shuffle_labels", type=str, default="False", help="Shuffle labels, for ablation study (accepts true/false)")
     parser.add_argument("--use_closed_form", action="store_true", help="Use closed-form solution instead of iterative training")
     # Wandb arguments
+    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--output_csv", type=str, default="probe_results_continuous.csv")
     parser.add_argument("--normalize_features", action="store_true", help="Normalize features")
     parser.add_argument("--custom_weights", type=str, default=None, help="Path to custom weights file (.pt or .pth) for ESM2 model (note: this script uses pre-extracted representations)")
@@ -205,6 +208,50 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     random.seed(args.seed)
     
+    # Extract model information for wandb tags
+    dataset_dir_name = os.path.basename(args.dataset_dir)
+    model_name = args.custom_weights if args.custom_weights else dataset_dir_name
+    
+    # Initialize wandb if enabled
+    if args.wandb:
+        # Generate wandb run name
+        run_name = f"{os.path.basename(args.dataset_dir)}"
+        if args.custom_weights:
+            run_name += f"_{os.path.basename(args.custom_weights).replace('.pt', '').replace('.pth', '')}"
+        
+        wandb.init(
+            project="esm2-eval-virulence",
+            name=run_name,
+            config={
+                "dataset_dir": args.dataset_dir,
+                "batch_size": args.batch_size,
+                "learning_rate": args.learning_rate,
+                "seed": args.seed,
+                "loss": args.loss,
+                "huber_delta": args.huber_delta,
+                "shuffle_labels": args.shuffle_labels,
+                "use_closed_form": args.use_closed_form,
+                "normalize_features": args.normalize_features,
+                "custom_weights": args.custom_weights,
+                "output_csv": args.output_csv,
+                "num_steps": args.num_steps,
+                "num_epochs": args.num_epochs,
+            },
+            tags=[
+                "virulence_eval", 
+                "linear_probe",
+                f"trained_on_{parse_model_tier(model_name)}",
+                f"size_{parse_model_size(model_name)}",
+                "closed_form" if args.use_closed_form else "iterative",
+            ]
+        )
+        
+        # Log dataset statistics
+        wandb.log({
+            "config/num_layers": len(layer_numbers),
+            "config/layers": layer_numbers,
+        })
+    
     # Initialize CSV file
     result_file = Path(args.output_csv)
     file_exists = result_file.exists()
@@ -212,6 +259,9 @@ if __name__ == "__main__":
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(["train_dataset_path", "test_dataset_path", "method", "probing_layer","learning_rate", "batch_size", "num_steps", "num_epochs", "loss", "rmse", "mae", "r2", "pearson", "shuffle_labels", "custom_weights"])
+    
+    # Track results across all layers for summary
+    all_layer_results = []
     
     # Process each layer
     for layer_num in layer_numbers:
@@ -268,6 +318,28 @@ if __name__ == "__main__":
         print(f"Test R2: {r2:.6f}")
         print(f"Test Pearson: {pearson:.6f}")
 
+        # Store results for summary
+        all_layer_results.append({
+            'layer': layer_num,
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+            'pearson': pearson,
+            'train_samples': len(train_labels),
+            'test_samples': len(test_labels),
+        })
+        
+        # Log layer-specific results to wandb
+        if args.wandb:
+            wandb.log({
+                f"layer_{layer_num}/test_rmse": rmse,
+                f"layer_{layer_num}/test_mae": mae,
+                f"layer_{layer_num}/test_r2": r2,
+                f"layer_{layer_num}/test_pearson": pearson,
+                f"layer_{layer_num}/train_samples": len(train_labels),
+                f"layer_{layer_num}/test_samples": len(test_labels),
+            })
+
         # Create dataset path names for CSV
         dataset_dir_name = os.path.basename(args.dataset_dir)
         train_path_name = f"{dataset_dir_name}/virulence_probe_dataset_layer_{layer_num}_train"
@@ -290,4 +362,43 @@ if __name__ == "__main__":
     print(f"\n{'='*80}")
     print(f"All layers processed. Results saved to {args.output_csv}")
     print(f"{'='*80}")
+    
+    # Log summary statistics to wandb
+    if args.wandb and all_layer_results:
+        # Find best performing layers by different metrics
+        best_by_r2 = max(all_layer_results, key=lambda x: x['r2'])
+        best_by_pearson = max(all_layer_results, key=lambda x: x['pearson'])
+        best_by_rmse = min(all_layer_results, key=lambda x: x['rmse'])
+        best_by_mae = min(all_layer_results, key=lambda x: x['mae'])
+        
+        # Calculate average metrics across all layers
+        avg_r2 = np.mean([r['r2'] for r in all_layer_results])
+        avg_pearson = np.mean([r['pearson'] for r in all_layer_results])
+        avg_rmse = np.mean([r['rmse'] for r in all_layer_results])
+        avg_mae = np.mean([r['mae'] for r in all_layer_results])
+        
+        wandb.log({
+            "summary/best_layer_by_r2": best_by_r2['layer'],
+            "summary/best_r2": best_by_r2['r2'],
+            "summary/best_layer_by_pearson": best_by_pearson['layer'],
+            "summary/best_pearson": best_by_pearson['pearson'],
+            "summary/best_layer_by_rmse": best_by_rmse['layer'],
+            "summary/best_rmse": best_by_rmse['rmse'],
+            "summary/best_layer_by_mae": best_by_mae['layer'],
+            "summary/best_mae": best_by_mae['mae'],
+            "summary/avg_r2": avg_r2,
+            "summary/avg_pearson": avg_pearson,
+            "summary/avg_rmse": avg_rmse,
+            "summary/avg_mae": avg_mae,
+            "summary/total_layers_processed": len(all_layer_results),
+        })
+        
+        print(f"\nBest Layer by R²: Layer {best_by_r2['layer']} (R²={best_by_r2['r2']:.6f})")
+        print(f"Best Layer by Pearson: Layer {best_by_pearson['layer']} (Pearson={best_by_pearson['pearson']:.6f})")
+        print(f"Best Layer by RMSE: Layer {best_by_rmse['layer']} (RMSE={best_by_rmse['rmse']:.6f})")
+        print(f"Best Layer by MAE: Layer {best_by_mae['layer']} (MAE={best_by_mae['mae']:.6f})")
+    
+    # Finish wandb run
+    if args.wandb:
+        wandb.finish()
     
