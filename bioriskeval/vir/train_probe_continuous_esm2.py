@@ -182,10 +182,16 @@ if __name__ == "__main__":
     parser.add_argument("--use_closed_form", action="store_true", help="Use closed-form solution instead of iterative training")
     # Wandb arguments
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    parser.add_argument("--output_csv", type=str, default="probe_results_continuous.csv")
     parser.add_argument("--normalize_features", action="store_true", help="Normalize features")
     parser.add_argument("--custom_weights", type=str, default=None, help="Path to custom weights file (.pt or .pth) for ESM2 model (note: this script uses pre-extracted representations)")
     args = parser.parse_args()
+    
+    # Auto-generate output_csv based on model info
+    model_name = args.custom_weights if args.custom_weights else args.dataset_dir
+    model_size = parse_model_size(model_name)
+    model_tier = parse_model_tier(model_name)
+    output_csv = f"{model_size}_{model_tier}.csv"
+    print(f"Output CSV filename: {output_csv}")
     
     # Find all layer files in the directory
     train_files = sorted(glob.glob(os.path.join(args.dataset_dir, "virulence_probe_dataset_layer_*_train.h5")))
@@ -233,7 +239,7 @@ if __name__ == "__main__":
                 "use_closed_form": args.use_closed_form,
                 "normalize_features": args.normalize_features,
                 "custom_weights": args.custom_weights,
-                "output_csv": args.output_csv,
+                "output_csv": output_csv,
                 "num_steps": args.num_steps,
                 "num_epochs": args.num_epochs,
             },
@@ -253,7 +259,7 @@ if __name__ == "__main__":
         })
     
     # Initialize CSV file
-    result_file = Path(args.output_csv)
+    result_file = Path(output_csv)
     file_exists = result_file.exists()
     with result_file.open("a", newline="") as f:
         writer = csv.writer(f)
@@ -360,7 +366,7 @@ if __name__ == "__main__":
             writer.writerow([train_path_name, test_path_name, method, layer_num, learning_rate, batch_size, num_steps, num_epochs, loss, f"{rmse:.6f}", f"{mae:.6f}", f"{r2:.6f}", f"{pearson:.6f}", args.shuffle_labels, custom_weights_info])
     
     print(f"\n{'='*80}")
-    print(f"All layers processed. Results saved to {args.output_csv}")
+    print(f"All layers processed. Results saved to {output_csv}")
     print(f"{'='*80}")
     
     # Log summary statistics to wandb
