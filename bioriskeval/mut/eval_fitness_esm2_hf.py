@@ -122,7 +122,7 @@ def score_dms_dataset(
     # Load model using optimized loader
     print("Loading model...")
     model_load_start = time.time()
-    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path)
+    model, tokenizer = load_esm2_model(model_name=model_name)
     
     # Apply optimizations
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -205,7 +205,7 @@ def main():
         help="Path to DMS CSV file (default: bioriskeval/mut/data/DMS_ProteinGym_substitutions/DMS_substitutions.csv)"
     )
     parser.add_argument(
-        "--ckpt-path",
+        "--model-name",
         type=str,
         help="HuggingFace model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'.",
     )
