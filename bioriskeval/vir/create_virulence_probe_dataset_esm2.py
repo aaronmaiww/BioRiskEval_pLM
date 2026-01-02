@@ -37,7 +37,12 @@ from Bio.Seq import Seq
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from bioriskeval.common import load_esm2_model, setup_model_optimizations
+from bioriskeval.common import (
+    load_esm2_model,
+    setup_model_optimizations,
+    parse_model_size,
+    parse_model_tier,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -155,10 +160,15 @@ def create_probe_dataset_hf(args):
         layer_numbers = [int(x) for x in args.layer_number]
         logger.info(f"Processing layers: {layer_numbers}")
     
-    # Process each split
-    os.makedirs(args.output_dir, exist_ok=True)
-    logger.info(f"Output directory: {os.path.abspath(args.output_dir)}")
+    # Create model-specific output directory
+    model_size = parse_model_size(args.model_name)
+    model_tier = parse_model_tier(args.model_name)
+    model_dir_name = f"{model_size}_{model_tier}"
+    model_output_dir = os.path.join(args.output_dir, model_dir_name)
+    os.makedirs(model_output_dir, exist_ok=True)
+    logger.info(f"Output directory: {os.path.abspath(model_output_dir)}")
     
+    # Process each split
     for split_name, (split_seqs, split_labels) in [('train', (train_sequences, train_labels)), 
                                                    ('test', (test_sequences, test_labels))]:
         
@@ -179,14 +189,13 @@ def create_probe_dataset_hf(args):
                     all_reprs_by_layer[layer_num].append(batch_reprs[layer_num])
         
         # Save each layer to separate HDF5 files
-        model_name_safe = args.model_name.replace("/", "_")
         for layer_num in layer_numbers:
             if all_reprs_by_layer[layer_num]:
                 final_reprs = np.concatenate(all_reprs_by_layer[layer_num], axis=0)
                 
                 # Create output filename
-                output_file = f"virulence_probe_dataset_{model_name_safe}_layer_{layer_num}_{split_name}.h5"
-                output_path = os.path.join(args.output_dir, output_file)
+                output_file = f"virulence_probe_dataset_layer_{layer_num}_{split_name}.h5"
+                output_path = os.path.join(model_output_dir, output_file)
                 
                 # Save to HDF5
                 with h5py.File(output_path, 'w') as f:
