@@ -6,6 +6,8 @@ import wandb
 import os
 import random
 import csv
+import glob
+import re
 from pathlib import Path
 from typing import Tuple, cast, Optional
 
@@ -162,8 +164,7 @@ def evaluate_probe(probe, test_representations, test_labels, args=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_dataset_path", type=str, default="/workspaces/BioRiskEval/attack/data/eval_dataset/virulence/probe_datasets/dms_probe_dataset_layer_26_train.h5")
-    parser.add_argument("--test_dataset_path", type=str, default="/workspaces/BioRiskEval/attack/data/eval_dataset/virulence/probe_datasets/dms_probe_dataset_layer_26_test.h5")
+    parser.add_argument("--dataset_dir", type=str, required=True, help="Directory containing virulence_probe_dataset_layer_*_train.h5 and virulence_probe_dataset_layer_*_test.h5 files")
     
     # Training duration options (mutually exclusive)
     training_group = parser.add_mutually_exclusive_group(required=False)
@@ -183,72 +184,110 @@ if __name__ == "__main__":
     parser.add_argument("--custom_weights", type=str, default=None, help="Path to custom weights file (.pt or .pth) for ESM2 model (note: this script uses pre-extracted representations)")
     args = parser.parse_args()
     
-
-
+    # Find all layer files in the directory
+    train_files = sorted(glob.glob(os.path.join(args.dataset_dir, "virulence_probe_dataset_layer_*_train.h5")))
+    
+    if not train_files:
+        raise ValueError(f"No training files found in {args.dataset_dir}")
+    
+    # Extract layer numbers from filenames
+    layer_numbers = []
+    for train_file in train_files:
+        match = re.search(r'layer_(\d+)_train\.h5', os.path.basename(train_file))
+        if match:
+            layer_numbers.append(int(match.group(1)))
+    
+    layer_numbers = sorted(layer_numbers)
+    print(f"Found {len(layer_numbers)} layers to probe: {layer_numbers}")
+    
+    # Set random seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
     
-
-    train_sequences, train_representations, train_labels = read_probe_dataset(args.train_dataset_path)
-    test_sequences, test_representations, test_labels = read_probe_dataset(args.test_dataset_path)
-
-    # Optionally shuffle training labels for ablation
-    if args.shuffle_labels == "True":
-        print("Shuffling training labels")
-        rng = np.random.default_rng(args.seed)
-        rng.shuffle(train_labels)
-
-    # Optional feature standardization
-    if args.normalize_features:
-        # Normalize each vector to have L2 norm = 1
-        print("Normalizing features to unit vectors...")
-        
-        # # Compute L2 norms for each vector (row) in train_representations
-        train_norms = np.linalg.norm(train_representations, axis=1, keepdims=True)
-        # Avoid division by zero - replace zero norms with 1
-        train_norms = np.where(train_norms == 0, 1, train_norms)
-        # Normalize train representations
-        train_representations = train_representations / train_norms
-        
-        # Compute L2 norms for each vector (row) in test_representations
-        test_norms = np.linalg.norm(test_representations, axis=1, keepdims=True)
-        # Avoid division by zero - replace zero norms with 1
-        test_norms = np.where(test_norms == 0, 1, test_norms)
-        # Normalize test representations
-        test_representations = test_representations / test_norms
-
-    
-   
-    print("Using closed-form solution for linear regression...")
-    probe = solve_linear_probe(train_representations, train_labels, args)
-
-    rmse, mae, r2, pearson = evaluate_probe(probe, test_representations, test_labels, args)
-    print(f"Test RMSE: {rmse:.6f}")
-    print(f"Test MAE: {mae:.6f}")
-    print(f"Test R2: {r2:.6f}")
-    print(f"Test Pearson: {pearson:.6f}")
-
-    train_path_name = "/".join(args.train_dataset_path.split("/")[-2:]).replace(".h5", "")
-    test_path_name = "/".join(args.test_dataset_path.split("/")[-2:]).replace(".h5", "")
-
-    # Append results to CSV, create file with header if it does not exist
+    # Initialize CSV file
     result_file = Path(args.output_csv)
     file_exists = result_file.exists()
     with result_file.open("a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(["train_dataset_path", "test_dataset_path", "method", "probing_layer","learning_rate", "batch_size", "num_steps", "num_epochs", "loss", "rmse", "mae", "r2", "pearson", "shuffle_labels", "custom_weights"])
+    
+    # Process each layer
+    for layer_num in layer_numbers:
+        print(f"\n{'='*80}")
+        print(f"Processing Layer {layer_num}")
+        print(f"{'='*80}")
         
-        method = "closed_form" if args.use_closed_form else "iterative"
-        learning_rate = "N/A" if args.use_closed_form else args.learning_rate
-        batch_size = "N/A" if args.use_closed_form else args.batch_size
-        num_steps = "N/A" if args.use_closed_form else args.num_steps
-        num_epochs = "N/A" if args.use_closed_form else args.num_epochs
-        loss = "N/A" if args.use_closed_form else args.loss
-        # Extract probing layer from filename
-        probing_layer = args.train_dataset_path.split("layer")[1].split("_")[1]
+        train_dataset_path = os.path.join(args.dataset_dir, f"virulence_probe_dataset_layer_{layer_num}_train.h5")
+        test_dataset_path = os.path.join(args.dataset_dir, f"virulence_probe_dataset_layer_{layer_num}_test.h5")
         
-        custom_weights_info = "N/A" if not args.custom_weights else os.path.basename(args.custom_weights)
-        writer.writerow([train_path_name, test_path_name, method, probing_layer, learning_rate, batch_size, num_steps, num_epochs, loss, f"{rmse:.6f}", f"{mae:.6f}", f"{r2:.6f}", f"{pearson:.6f}", args.shuffle_labels, custom_weights_info])
+        if not os.path.exists(train_dataset_path):
+            print(f"Warning: Training file not found: {train_dataset_path}")
+            continue
+        if not os.path.exists(test_dataset_path):
+            print(f"Warning: Test file not found: {test_dataset_path}")
+            continue
+        
+        # Load datasets
+        train_sequences, train_representations, train_labels = read_probe_dataset(train_dataset_path)
+        test_sequences, test_representations, test_labels = read_probe_dataset(test_dataset_path)
+
+        # Optionally shuffle training labels for ablation
+        if args.shuffle_labels == "True":
+            print("Shuffling training labels")
+            rng = np.random.default_rng(args.seed)
+            rng.shuffle(train_labels)
+
+        # Optional feature standardization
+        if args.normalize_features:
+            # Normalize each vector to have L2 norm = 1
+            print("Normalizing features to unit vectors...")
+            
+            # # Compute L2 norms for each vector (row) in train_representations
+            train_norms = np.linalg.norm(train_representations, axis=1, keepdims=True)
+            # Avoid division by zero - replace zero norms with 1
+            train_norms = np.where(train_norms == 0, 1, train_norms)
+            # Normalize train representations
+            train_representations = train_representations / train_norms
+            
+            # Compute L2 norms for each vector (row) in test_representations
+            test_norms = np.linalg.norm(test_representations, axis=1, keepdims=True)
+            # Avoid division by zero - replace zero norms with 1
+            test_norms = np.where(test_norms == 0, 1, test_norms)
+            # Normalize test representations
+            test_representations = test_representations / test_norms
+
+        
+        print("Using closed-form solution for linear regression...")
+        probe = solve_linear_probe(train_representations, train_labels, args)
+
+        rmse, mae, r2, pearson = evaluate_probe(probe, test_representations, test_labels, args)
+        print(f"Test RMSE: {rmse:.6f}")
+        print(f"Test MAE: {mae:.6f}")
+        print(f"Test R2: {r2:.6f}")
+        print(f"Test Pearson: {pearson:.6f}")
+
+        # Create dataset path names for CSV
+        dataset_dir_name = os.path.basename(args.dataset_dir)
+        train_path_name = f"{dataset_dir_name}/virulence_probe_dataset_layer_{layer_num}_train"
+        test_path_name = f"{dataset_dir_name}/virulence_probe_dataset_layer_{layer_num}_test"
+
+        # Append results to CSV
+        with result_file.open("a", newline="") as f:
+            writer = csv.writer(f)
+            
+            method = "closed_form" if args.use_closed_form else "iterative"
+            learning_rate = "N/A" if args.use_closed_form else args.learning_rate
+            batch_size = "N/A" if args.use_closed_form else args.batch_size
+            num_steps = "N/A" if args.use_closed_form else args.num_steps
+            num_epochs = "N/A" if args.use_closed_form else args.num_epochs
+            loss = "N/A" if args.use_closed_form else args.loss
+            
+            custom_weights_info = "N/A" if not args.custom_weights else os.path.basename(args.custom_weights)
+            writer.writerow([train_path_name, test_path_name, method, layer_num, learning_rate, batch_size, num_steps, num_epochs, loss, f"{rmse:.6f}", f"{mae:.6f}", f"{r2:.6f}", f"{pearson:.6f}", args.shuffle_labels, custom_weights_info])
+    
+    print(f"\n{'='*80}")
+    print(f"All layers processed. Results saved to {args.output_csv}")
+    print(f"{'='*80}")
     
