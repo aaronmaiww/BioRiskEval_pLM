@@ -335,12 +335,12 @@ if __name__ == "__main__":
         
         # Log layer-specific results to wandb
         wandb.log({
-            f"layer_{layer_num}/test_rmse": rmse,
-            f"layer_{layer_num}/test_mae": mae,
-            f"layer_{layer_num}/test_r2": r2,
-            f"layer_{layer_num}/test_pearson": pearson,
-            f"layer_{layer_num}/train_samples": len(train_labels),
-            f"layer_{layer_num}/test_samples": len(test_labels),
+            f"test_rmse/layer_{layer_num}": rmse,
+            f"test_mae/layer_{layer_num}": mae,
+            f"test_r2/layer_{layer_num}": r2,
+            f"test_pearson/layer_{layer_num}": pearson,
+            f"train_samples/layer_{layer_num}": len(train_labels),
+            f"test_samples/layer_{layer_num}": len(test_labels),
         })
 
         # Create dataset path names for CSV
