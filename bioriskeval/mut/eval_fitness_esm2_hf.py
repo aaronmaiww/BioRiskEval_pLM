@@ -207,7 +207,6 @@ def main():
     parser.add_argument(
         "--ckpt-path",
         type=str,
-        default="facebook/esm2_t6_8M_UR50D",
         help="HuggingFace model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'.",
     )
     parser.add_argument(

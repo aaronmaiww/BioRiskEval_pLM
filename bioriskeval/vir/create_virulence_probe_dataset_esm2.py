@@ -12,21 +12,19 @@ Usage:
 import argparse
 import logging
 import os
+import warnings
+from pathlib import Path
+from typing import Any, Dict, List, cast
+
 import h5py
 import numpy as np
 import pandas as pd
 import torch
-from pathlib import Path
+from Bio.Seq import Seq
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-import warnings
-from typing import List, Dict, Any, cast
 
-# HuggingFace imports for ESM2
-from transformers import AutoTokenizer, EsmForMaskedLM
-
-# BioPython for DNA translation
-from Bio.Seq import Seq
+from bioriskeval.common import load_esm2_model, setup_model_optimizations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,54 +39,12 @@ def translate_dna_to_protein(dna_sequence: str) -> str:
     seq = Seq(dna_sequence)
     protein = seq.translate(to_stop=True)  # Stop at first stop codon
     return str(protein)
-
-
-def load_esm2_model_hf(model_name: str, custom_weights_path: str = None):
-    """Load ESM2 model using HuggingFace transformers."""
-    logger.info(f"Loading HuggingFace ESM2 model: {model_name}")
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = EsmForMaskedLM.from_pretrained(model_name)
-    
-    # Load custom weights if provided
-    if custom_weights_path:
-        logger.info(f"Loading custom weights from: {custom_weights_path}")
-        try:
-            custom_state_dict = torch.load(custom_weights_path, map_location='cpu')
-            
-            # Handle different state dict formats
-            if 'model' in custom_state_dict:
-                custom_state_dict = custom_state_dict['model']
-            elif 'state_dict' in custom_state_dict:
-                custom_state_dict = custom_state_dict['state_dict']
-            
-            # Load the state dict (strict=False to allow partial loading)
-            missing_keys, unexpected_keys = model.load_state_dict(custom_state_dict, strict=False)
-            
-            if missing_keys:
-                logger.info(f"Missing keys when loading custom weights: {missing_keys[:5]}...")  # Show first 5
-            if unexpected_keys:
-                logger.info(f"Unexpected keys when loading custom weights: {unexpected_keys[:5]}...")  # Show first 5
-                
-            logger.info("Custom weights loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load custom weights: {e}")
-            logger.info("Continuing with pretrained weights...")
-    
-    model.eval()
-    
-    # Move to GPU if available
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    logger.info(f"Model loaded on device: {device}")
-    
-    return model, tokenizer, device
     
 
 def extract_representations_batch(sequences: List[str], 
                                   model, 
                                   tokenizer, 
-                                  device: str, 
+                                  device, 
                                   layer_numbers: List[int]) -> Dict[int, np.ndarray]:
     """
     Extract representations from specified layers for a batch of sequences.
@@ -164,8 +120,10 @@ def create_probe_dataset_hf(args):
     logger.info(f"Split: {len(train_sequences)} train, {len(test_sequences)} test")
     
     # Load ESM2 model
-    model, tokenizer, device = load_esm2_model_hf(args.model_name, args.custom_weights)
-    logger.info(f"Model loaded successfully")
+    model, tokenizer = load_esm2_model(args.model_name)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = setup_model_optimizations(model, device)
+    logger.info(f"Model loaded and optimized successfully")
     
     # Process each split
     os.makedirs(args.output_dir, exist_ok=True)
@@ -307,8 +265,6 @@ def main():
                        help="Batch size for representation extraction")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed for reproducibility")
-    parser.add_argument("--custom_weights", type=str, default=None,
-                       help="Path to custom weights file (.pt or .pth) to load into the model")
     
     args = parser.parse_args()
     print("Starting virulence probe dataset creation...")
