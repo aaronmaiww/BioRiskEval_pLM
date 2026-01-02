@@ -250,6 +250,12 @@ if __name__ == "__main__":
         ]
     )
     
+    wandb.define_metric("layer")
+    wandb.define_metric("test_rmse", step_metric="layer")
+    wandb.define_metric("test_mae", step_metric="layer")
+    wandb.define_metric("test_r2", step_metric="layer")
+    wandb.define_metric("test_pearson", step_metric="layer")
+    
     # Log dataset statistics
     wandb.log({
         "config/num_layers": len(layer_numbers),
@@ -335,15 +341,16 @@ if __name__ == "__main__":
         
         # Log layer-specific results to wandb
         wandb.log({
+            "layer": layer_num,
             "test_rmse": rmse,
             "test_mae": mae,
             "test_r2": r2,
             "test_pearson": pearson,
             "train_samples": len(train_labels),
             "test_samples": len(test_labels),
-        }, step=layer_num)
+        })
 
-        # Create dataset path names for CSV
+        # Create dataset path names forf CSV
         dataset_dir_name = os.path.basename(args.dataset_dir)
         train_path_name = f"{dataset_dir_name}/virulence_probe_dataset_layer_{layer_num}_train"
         test_path_name = f"{dataset_dir_name}/virulence_probe_dataset_layer_{layer_num}_test"
