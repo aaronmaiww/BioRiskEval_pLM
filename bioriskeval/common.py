@@ -250,7 +250,7 @@ def parse_model_size(model_name: str) -> str:
 
 
 
-def load_esm2_model(ckpt_path: str) -> tuple:
+def load_esm2_model(model_name: str) -> tuple:
     """
     Load ESM2 model using HuggingFace transformers.
     
@@ -261,9 +261,9 @@ def load_esm2_model(ckpt_path: str) -> tuple:
         tokenizer: HuggingFace ESM2 tokenizer
     """
     # Parse model size and get corresponding Facebook config
-    model_size = parse_model_size(ckpt_path)
+    model_size = parse_model_size(model_name)
     facebook_model = FACEBOOK_CONFIG[model_size]
-    print(f"Using custom model {ckpt_path} with architecture from {facebook_model}")
+    print(f"Using custom model {model_name} with architecture from {facebook_model}")
     
     # Initialize tokenizer and model from Facebook architecture
     tokenizer = AutoTokenizer.from_pretrained(facebook_model)
@@ -276,11 +276,11 @@ def load_esm2_model(ckpt_path: str) -> tuple:
     
     # Load custom weights from HuggingFace model
     try:
-        print(f"Loading custom weights from HuggingFace model: {ckpt_path}")
+        print(f"Loading custom weights from HuggingFace model: {model_name}")
         from huggingface_hub import hf_hub_download
 
         # Download model.bin file
-        model_bin_path = hf_hub_download(repo_id=ckpt_path, filename="model.bin")
+        model_bin_path = hf_hub_download(repo_id=model_name, filename="model.bin")
         custom_state_dict = torch.load(model_bin_path, map_location='cpu')
         
         # Extract model_state_dict from the ordered_dict
