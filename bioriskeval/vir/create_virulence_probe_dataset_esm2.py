@@ -3,9 +3,22 @@
 Create linear probe dataset from virulence data with HuggingFace ESM2 representations.
 
 Usage:
+    # Single layer
     python create_virulence_probe_dataset_esm2.py --model_name facebook/esm2_t30_150M_UR50D \
                                                    --output_dir ./probe_datasets \
-                                                   --layer_numbers 12 24 30 \
+                                                   --layer_number 12 \
+                                                   --seed 42
+    
+    # Multiple layers
+    python create_virulence_probe_dataset_esm2.py --model_name facebook/esm2_t30_150M_UR50D \
+                                                   --output_dir ./probe_datasets \
+                                                   --layer_number 12 24 30 \
+                                                   --seed 42
+    
+    # All layers
+    python create_virulence_probe_dataset_esm2.py --model_name facebook/esm2_t30_150M_UR50D \
+                                                   --output_dir ./probe_datasets \
+                                                   --layer_number all \
                                                    --seed 42
 """
 
@@ -125,6 +138,23 @@ def create_probe_dataset_hf(args):
     model = setup_model_optimizations(model, device)
     logger.info(f"Model loaded and optimized successfully")
     
+    # Parse layer numbers
+    if len(args.layer_number) == 1 and args.layer_number[0].lower() == 'all':
+        # Get all layers from the model
+        # ESM2 models have hidden states for embedding + each layer
+        # Need to run a dummy forward pass to count layers
+        dummy_input = tokenizer(["M"], return_tensors="pt", padding=True)
+        dummy_input = {k: v.to(device) for k, v in dummy_input.items()}
+        with torch.no_grad():
+            dummy_output = model(**dummy_input, output_hidden_states=True)
+            num_layers = len(dummy_output.hidden_states)
+        layer_numbers = list(range(num_layers))
+        logger.info(f"Processing all {num_layers} layers")
+    else:
+        # Convert string arguments to integers
+        layer_numbers = [int(x) for x in args.layer_number]
+        logger.info(f"Processing layers: {layer_numbers}")
+    
     # Process each split
     os.makedirs(args.output_dir, exist_ok=True)
     logger.info(f"Output directory: {os.path.abspath(args.output_dir)}")
@@ -132,36 +162,42 @@ def create_probe_dataset_hf(args):
     for split_name, (split_seqs, split_labels) in [('train', (train_sequences, train_labels)), 
                                                    ('test', (test_sequences, test_labels))]:
         
-        # Process single layer
-        logger.info(f"Processing {split_name} split, layer {args.layer_number}...")
+        logger.info(f"Processing {split_name} split for {len(layer_numbers)} layers...")
         
-        # Extract representations in batches
-        all_reprs = []
-        for i in tqdm(range(0, len(split_seqs), args.batch_size), desc=f"Layer {args.layer_number} {split_name}"):
+        # Initialize storage for all layers
+        all_reprs_by_layer = {layer_num: [] for layer_num in layer_numbers}
+        
+        # Extract representations in batches (one forward pass per batch for all layers)
+        for i in tqdm(range(0, len(split_seqs), args.batch_size), desc=f"Extracting {split_name}"):
             batch_seqs = split_seqs[i:i + args.batch_size]
-            batch_reprs = extract_representations_batch(batch_seqs, model, tokenizer, device, [args.layer_number])
-            if args.layer_number in batch_reprs:
-                all_reprs.append(batch_reprs[args.layer_number])
+            # Extract ALL requested layers in one forward pass
+            batch_reprs = extract_representations_batch(batch_seqs, model, tokenizer, device, layer_numbers)
+            
+            # Store representations for each layer
+            for layer_num in layer_numbers:
+                if layer_num in batch_reprs:
+                    all_reprs_by_layer[layer_num].append(batch_reprs[layer_num])
         
-        # Save to HDF5 if we got representations
-        if all_reprs:
-            final_reprs = np.concatenate(all_reprs, axis=0)
-            
-            # Create output filename
-            model_name_safe = args.model_name.replace("/", "_")
-            output_file = f"virulence_probe_dataset_{model_name_safe}_layer_{args.layer_number}_{split_name}.h5"
-            output_path = os.path.join(args.output_dir, output_file)
-            
-            # Save to HDF5
-            with h5py.File(output_path, 'w') as f:
-                f.create_dataset('sequences', data=np.array(split_seqs, dtype='S'), compression='gzip')
-                f.create_dataset('representations', data=final_reprs, compression='gzip')
-                f.create_dataset('labels', data=np.array(split_labels))
-                f.attrs['model_name'] = args.model_name
-                f.attrs['layer_number'] = args.layer_number
-                f.attrs['split'] = split_name
-            
-            logger.info(f"Saved {output_path}: {final_reprs.shape}")
+        # Save each layer to separate HDF5 files
+        model_name_safe = args.model_name.replace("/", "_")
+        for layer_num in layer_numbers:
+            if all_reprs_by_layer[layer_num]:
+                final_reprs = np.concatenate(all_reprs_by_layer[layer_num], axis=0)
+                
+                # Create output filename
+                output_file = f"virulence_probe_dataset_{model_name_safe}_layer_{layer_num}_{split_name}.h5"
+                output_path = os.path.join(args.output_dir, output_file)
+                
+                # Save to HDF5
+                with h5py.File(output_path, 'w') as f:
+                    f.create_dataset('sequences', data=np.array(split_seqs, dtype='S'), compression='gzip')
+                    f.create_dataset('representations', data=final_reprs, compression='gzip')
+                    f.create_dataset('labels', data=np.array(split_labels))
+                    f.attrs['model_name'] = args.model_name
+                    f.attrs['layer_number'] = layer_num
+                    f.attrs['split'] = split_name
+                
+                logger.info(f"Saved {output_path}: {final_reprs.shape}")
     
     logger.info("Dataset creation completed!")
 
@@ -251,8 +287,8 @@ def main():
     
     parser.add_argument("--model_name", type=str, default="facebook/esm2_t6_8M_UR50D",
                        help="HuggingFace ESM2 model name")
-    parser.add_argument("--layer_number", type=int, default=4,
-                       help="Layer number to extract representations from")
+    parser.add_argument("--layer_number", nargs='+', default=['4'],
+                       help="Layer number(s) to extract representations from. Can be multiple integers (e.g., 1 2 5) or 'all' for all layers")
     parser.add_argument("--dataset_path", type=str, default="data/influenza_virulence_ld50_cleaned_BALB_C.csv",
                        help="Path to reference dataset")
     parser.add_argument("--dataset_type", type=str, default="continuos", choices=["binary", "continuous"],
