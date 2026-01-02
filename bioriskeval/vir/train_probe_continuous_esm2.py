@@ -103,8 +103,8 @@ def solve_linear_probe(representations: np.ndarray, labels: np.ndarray, args: Op
     print(f"  Training MSE: {mse_loss:.6f}")
     print(f"  Training MAE: {mae_loss:.6f}")
     
-    # Log to wandb if enabled
-    if args and hasattr(args, 'wandb') and args.wandb:
+    # Log to wandb
+    if args:
         wandb.log({
             "model/input_dim": D,
             "model/output_dim": 1,
@@ -149,7 +149,7 @@ def evaluate_probe(probe, test_representations, test_labels, args=None):
             pearson = 0.0
         
         # Log test metrics to wandb
-        if args and hasattr(args, 'wandb') and args.wandb:
+        if args:
             wandb.log({
                 "test/mse": mse,
                 "test/rmse": rmse,
@@ -181,7 +181,6 @@ if __name__ == "__main__":
     parser.add_argument("--shuffle_labels", type=str, default="False", help="Shuffle labels, for ablation study (accepts true/false)")
     parser.add_argument("--use_closed_form", action="store_true", help="Use closed-form solution instead of iterative training")
     # Wandb arguments
-    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--normalize_features", action="store_true", help="Normalize features")
     parser.add_argument("--custom_weights", type=str, default=None, help="Path to custom weights file (.pt or .pth) for ESM2 model (note: this script uses pre-extracted representations)")
     args = parser.parse_args()
@@ -218,45 +217,44 @@ if __name__ == "__main__":
     dataset_dir_name = os.path.basename(args.dataset_dir)
     model_name = args.custom_weights if args.custom_weights else dataset_dir_name
     
-    # Initialize wandb if enabled
-    if args.wandb:
-        # Generate wandb run name
-        run_name = f"{os.path.basename(args.dataset_dir)}"
-        if args.custom_weights:
-            run_name += f"_{os.path.basename(args.custom_weights).replace('.pt', '').replace('.pth', '')}"
-        
-        wandb.init(
-            project="esm2-eval-virulence",
-            name=run_name,
-            config={
-                "dataset_dir": args.dataset_dir,
-                "batch_size": args.batch_size,
-                "learning_rate": args.learning_rate,
-                "seed": args.seed,
-                "loss": args.loss,
-                "huber_delta": args.huber_delta,
-                "shuffle_labels": args.shuffle_labels,
-                "use_closed_form": args.use_closed_form,
-                "normalize_features": args.normalize_features,
-                "custom_weights": args.custom_weights,
-                "output_csv": output_csv,
-                "num_steps": args.num_steps,
-                "num_epochs": args.num_epochs,
-            },
-            tags=[
-                "virulence_eval", 
-                "linear_probe",
-                f"trained_on_{parse_model_tier(model_name)}",
-                f"size_{parse_model_size(model_name)}",
-                "closed_form" if args.use_closed_form else "iterative",
-            ]
-        )
-        
-        # Log dataset statistics
-        wandb.log({
-            "config/num_layers": len(layer_numbers),
-            "config/layers": layer_numbers,
-        })
+    # Initialize wandb
+    # Generate wandb run name
+    run_name = f"{os.path.basename(args.dataset_dir)}"
+    if args.custom_weights:
+        run_name += f"_{os.path.basename(args.custom_weights).replace('.pt', '').replace('.pth', '')}"
+    
+    wandb.init(
+        project="esm2-eval-virulence",
+        name=run_name,
+        config={
+            "dataset_dir": args.dataset_dir,
+            "batch_size": args.batch_size,
+            "learning_rate": args.learning_rate,
+            "seed": args.seed,
+            "loss": args.loss,
+            "huber_delta": args.huber_delta,
+            "shuffle_labels": args.shuffle_labels,
+            "use_closed_form": args.use_closed_form,
+            "normalize_features": args.normalize_features,
+            "custom_weights": args.custom_weights,
+            "output_csv": output_csv,
+            "num_steps": args.num_steps,
+            "num_epochs": args.num_epochs,
+        },
+        tags=[
+            "virulence_eval", 
+            "linear_probe",
+            f"trained_on_{parse_model_tier(model_name)}",
+            f"size_{parse_model_size(model_name)}",
+            "closed_form" if args.use_closed_form else "iterative",
+        ]
+    )
+    
+    # Log dataset statistics
+    wandb.log({
+        "config/num_layers": len(layer_numbers),
+        "config/layers": layer_numbers,
+    })
     
     # Initialize CSV file
     result_file = Path(output_csv)
@@ -336,15 +334,14 @@ if __name__ == "__main__":
         })
         
         # Log layer-specific results to wandb
-        if args.wandb:
-            wandb.log({
-                f"layer_{layer_num}/test_rmse": rmse,
-                f"layer_{layer_num}/test_mae": mae,
-                f"layer_{layer_num}/test_r2": r2,
-                f"layer_{layer_num}/test_pearson": pearson,
-                f"layer_{layer_num}/train_samples": len(train_labels),
-                f"layer_{layer_num}/test_samples": len(test_labels),
-            })
+        wandb.log({
+            f"layer_{layer_num}/test_rmse": rmse,
+            f"layer_{layer_num}/test_mae": mae,
+            f"layer_{layer_num}/test_r2": r2,
+            f"layer_{layer_num}/test_pearson": pearson,
+            f"layer_{layer_num}/train_samples": len(train_labels),
+            f"layer_{layer_num}/test_samples": len(test_labels),
+        })
 
         # Create dataset path names for CSV
         dataset_dir_name = os.path.basename(args.dataset_dir)
@@ -370,7 +367,7 @@ if __name__ == "__main__":
     print(f"{'='*80}")
     
     # Log summary statistics to wandb
-    if args.wandb and all_layer_results:
+    if all_layer_results:
         # Find best performing layers by different metrics
         best_by_r2 = max(all_layer_results, key=lambda x: x['r2'])
         best_by_pearson = max(all_layer_results, key=lambda x: x['pearson'])
@@ -405,6 +402,5 @@ if __name__ == "__main__":
         print(f"Best Layer by MAE: Layer {best_by_mae['layer']} (MAE={best_by_mae['mae']:.6f})")
     
     # Finish wandb run
-    if args.wandb:
-        wandb.finish()
+    wandb.finish()
     
