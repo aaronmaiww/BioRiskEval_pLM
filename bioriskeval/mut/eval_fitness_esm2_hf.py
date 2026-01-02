@@ -85,7 +85,7 @@ def get_performance_results(merged_df, DMS_score_column, model_score_column, DMS
 
 def score_dms_dataset(
     dms_df: pd.DataFrame,
-    ckpt_path: str,
+    model_name: str,
     batch_size: int = 256,
     aggregate: str = "sum",
     max_seq_len: int = 1024,
@@ -99,7 +99,7 @@ def score_dms_dataset(
     
     Args:
         dms_df: DataFrame with DMS data
-        ckpt_path: HuggingFace model name or path to local weights file (.pt or .pth)
+        model_name: HuggingFace model name
         batch_size: Batch size for processing
         aggregate: "sum" for total log-likelihood, "mean" for average log-likelihood
         max_seq_len: Maximum sequence length
@@ -270,7 +270,7 @@ def main():
     # Auto-determine batch size if not specified
     
     # Generate wandb run name
-    model_name = args.ckpt_path.split("/")[-1]
+    model_name = args.model_name.split("/")[-1]
     wandb_run_name = f"{model_name}"
     
     # Initialize wandb
@@ -278,7 +278,7 @@ def main():
         project="esm2-fitness-eval",
         name=wandb_run_name,
         config={
-            "ckpt_path": args.ckpt_path,
+            "model_name": args.model_name,
             "csv_path": args.csv_path,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
@@ -288,8 +288,8 @@ def main():
             "output_dir": args.output_dir,
         },
         tags=["fitness_eval", "dms",
-              f"trained_on_{parse_model_tier(args.ckpt_path)}",
-              f"size_{parse_model_size(args.ckpt_path)}"]
+              f"trained_on_{parse_model_tier(args.model_name)}",
+              f"size_{parse_model_size(args.model_name)}"]
     )
     
     try:
@@ -297,7 +297,7 @@ def main():
         print("=" * 60)
         print("ESM2 Fitness Evaluation (Optimized)")
         print("=" * 60)
-        print(f"Model: {args.ckpt_path}")
+        print(f"Model: {args.model_name}")
         print(f"CSV path: {args.csv_path}")
         print(f"Batch size: {args.batch_size}")
         print(f"Max sequence length: {args.max_seq_len}")
@@ -329,7 +329,7 @@ def main():
         total_start = time.time()
         scored_df, model_load_time, scoring_time = score_dms_dataset(
             dms_df,
-            args.ckpt_path,
+            args.model_name,
             batch_size=args.batch_size,
             aggregate=args.aggregate,
             max_seq_len=args.max_seq_len,
@@ -391,7 +391,7 @@ def main():
         # Save summary
         summary_file = f"{args.output_dir}/{model_name}_summary.csv"
         summary_df = pd.DataFrame([{
-            'ckpt_path': args.ckpt_path,
+            'model_name': args.model_name,
             'n_mutations': len(scored_df),
             'n_scored': scored_df['esm2_pseudo_ppl'].notna().sum(),
             'total_time_seconds': total_time,
