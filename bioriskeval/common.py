@@ -200,34 +200,106 @@ class PerformanceProfiler:
 def parse_model_tier(model_name: str) -> str:
     """
     Parse model tier from HuggingFace model name.
-    
+
     Args:
-        model_name (str): Model name like "given131/8M_T1" or "facebook/esm2_t6_8M_UR50D"
+        model_name (str): Model name like "given131/8M_T1", "facebook/esm2_t6_8M_UR50D",
+                          or new format like "given131/35M_R_80P"
     Returns:
-        str: Tier number (e.g., '1', '2', '3', 'H', 'F')
+        str: Tier number (e.g., '1', '2', '3', 'H', 'F') or 'unknown'
     """
-    if "T1" in model_name:
-        return "1"
-    elif "T2" in model_name:
-        return "2"
-    elif "T5" in model_name:
-        return "5"
-    elif "T6" in model_name:
-        return "6"
-    elif "H" in model_name:
+    import re
+
+    # Check for traditional tier format (T1, T2, etc.) with word boundary
+    tier_match = re.search(r'_T(\d+)(?:_|$)', model_name)
+    if tier_match:
+        return tier_match.group(1)
+
+    # Check for H or F tier with word boundary (e.g., "_H_" or "_H" at end)
+    if re.search(r'_H(?:_|$)', model_name):
         return "H"
-    elif "F" in model_name:
+    if re.search(r'_F(?:_|$)', model_name):
         return "F"
-    else:
-        # Facebook 모델의 경우 tier를 추출
-        if "t6" in model_name.lower():
-            return "6"
-        elif "t12" in model_name.lower():
-            return "12"
-        elif "t30" in model_name.lower():
-            return "30"
-        # 기본값으로 "unknown" 반환 (에러 대신)
-        return "unknown"
+
+    # Facebook models: extract tier from architecture name
+    if "t6" in model_name.lower() and "esm2" in model_name.lower():
+        return "6"
+    elif "t12" in model_name.lower() and "esm2" in model_name.lower():
+        return "12"
+    elif "t30" in model_name.lower() and "esm2" in model_name.lower():
+        return "30"
+
+    # 기본값으로 "unknown" 반환 (에러 대신)
+    return "unknown"
+
+
+def parse_model_type(model_name: str) -> str:
+    """
+    Parse model type from new naming convention (e.g., R, C, I).
+
+    Args:
+        model_name (str): Model name like "given131/35M_R_80P" or "35M_C_P_80P_D2"
+    Returns:
+        str: Model type (e.g., 'R', 'C', 'I') or 'unknown'
+    """
+    import re
+    # Pattern: after size (8M, 35M, 150M), look for type letter
+    # e.g., "35M_R_80P" -> R, "35M_C_P_80P_D2" -> C
+    match = re.search(r'(?:8M|35M|150M)_([A-Z])(?:_|$)', model_name)
+    if match:
+        return match.group(1)
+    return "unknown"
+
+
+def parse_model_subtype(model_name: str) -> str:
+    """
+    Parse model subtype from new naming convention (e.g., P, U).
+
+    Args:
+        model_name (str): Model name like "35M_C_P_80P_D2" or "35M_I_U_40P"
+    Returns:
+        str: Model subtype (e.g., 'P', 'U') or None if not present
+    """
+    import re
+    # Pattern: after size and type, look for single letter subtype before percentage
+    # e.g., "35M_C_P_80P" -> P, "35M_I_U_40P" -> U, "35M_R_80P" -> None
+    match = re.search(r'(?:8M|35M|150M)_[A-Z]_([A-Z])_\d+P', model_name)
+    if match:
+        return match.group(1)
+    return None
+
+
+def parse_model_percentage(model_name: str) -> str:
+    """
+    Parse data percentage from model name (e.g., 80P, 40P).
+
+    Args:
+        model_name (str): Model name like "35M_R_80P" or "35M_C_P_80P_D2"
+    Returns:
+        str: Percentage string (e.g., '80P', '40P') or None if not present
+    """
+    import re
+    # Pattern: look for number followed by P (percentage marker)
+    match = re.search(r'(\d+P)(?:_|$)', model_name)
+    if match:
+        return match.group(1)
+    return None
+
+
+def parse_model_duplication(model_name: str) -> str:
+    """
+    Parse duplication info from model name (e.g., D2).
+
+    Args:
+        model_name (str): Model name like "35M_C_P_80P_D2"
+    Returns:
+        str: Duplication string (e.g., 'D2') or None if not present
+    """
+    import re
+    # Pattern: look for D followed by number
+    match = re.search(r'(D\d+)(?:_|$)', model_name)
+    if match:
+        return match.group(1)
+    return None
 
 
 def parse_model_size(model_name: str) -> str:
