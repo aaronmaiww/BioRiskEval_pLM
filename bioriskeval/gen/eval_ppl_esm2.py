@@ -11,6 +11,8 @@ from Bio import SeqIO
 from bioriskeval.common import (cleanup_gpu_memory,
                                 compute_pseudo_ppl_hf_batch, load_esm2_model,
                                 parse_model_size, parse_model_tier,
+                                parse_model_type, parse_model_subtype,
+                                parse_model_percentage, parse_model_duplication,
                                 setup_model_optimizations)
 
 # Performance optimizations
@@ -272,22 +274,51 @@ def main():
     else:
         output_path = args.output
 
-    # Generate wandb run name: {model_name}_eval_on_{eval_tier}
-    # Extract model name from path (e.g., "given131/150M_T1" -> "150M_T1")
+    # Parse model metadata
     model_name = args.model_name.split("/")[-1]
+    model_size = parse_model_size(args.model_name)
+    model_tier = parse_model_tier(args.model_name)
+    model_type = parse_model_type(args.model_name)
+    model_subtype = parse_model_subtype(args.model_name)
+    model_percentage = parse_model_percentage(args.model_name)
+    model_duplication = parse_model_duplication(args.model_name)
+
+    # Generate wandb run name: {model_name}_eval_on_{eval_tier}
     wandb_run_name = f"{model_name}_eval_on_{args.tier}"
+
+    # Build tags dynamically based on available metadata
+    tags = [
+        f"eval_tier_{args.tier}",
+        f"size_{model_size}",
+    ]
+    if model_tier != "unknown":
+        tags.append(f"trained_tier_{model_tier}")
+    if model_type != "unknown":
+        tags.append(f"type_{model_type}")
+    if model_subtype:
+        tags.append(f"subtype_{model_subtype}")
+    if model_percentage:
+        tags.append(f"pct_{model_percentage}")
+    if model_duplication:
+        tags.append(f"dup_{model_duplication}")
 
     # Initialize wandb
     wandb.init(
-        project="esm2-gen-eval-random",
+        project="esm2-gen-eval",
         name=wandb_run_name,
         config={
             "model_name": args.model_name,
+            "model_size": model_size,
+            "model_tier": model_tier,
+            "model_type": model_type,
+            "model_subtype": model_subtype,
+            "model_percentage": model_percentage,
+            "model_duplication": model_duplication,
             "eval_tier": args.tier,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
             "mask_chunk_size": args.mask_chunk_size,
-            "precision": "bf16",  # Always BF16
+            "precision": "bf16",
             "use_compile": args.use_compile,
             "use_flash_attn": args.use_flash_attn,
             "num_workers": args.num_workers,
@@ -295,9 +326,7 @@ def main():
             "fasta_path": fasta_path,
             "output_path": output_path,
         },
-        tags=[f"tier_{args.tier}",
-              f"trained_on_{parse_model_tier(args.model_name)}",
-              f"size_{parse_model_size(args.model_name)}"]
+        tags=tags,
     )
 
     print(f"Evaluating perplexity using ESM2 model: {args.model_name}")
