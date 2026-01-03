@@ -24,7 +24,7 @@ fi
 echo "Detected $NUM_GPUS GPUs"
 
 # Max parallel jobs per GPU
-MAX_JOBS_PER_GPU=4
+MAX_JOBS_PER_GPU=3
 
 # List of all checkpoints from model_list
 CHECKPOINTS=(
