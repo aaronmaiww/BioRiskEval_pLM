@@ -523,7 +523,7 @@ def compute_batch_pseudo_ppl_from_tensors(
     autocast_context = torch.cuda.amp.autocast(dtype=torch.bfloat16) if autocast_enabled else contextlib.nullcontext()
 
     # Process all chunks - stay on GPU
-    for chunk_start in tqdm(range(0, total_positions, mask_chunk_size)):
+    for chunk_start in range(0, total_positions, mask_chunk_size):
         with (profiler.profile("4c_chunk_slicing") if profiler else contextlib.nullcontext()):
             chunk_end = min(chunk_start + mask_chunk_size, total_positions)
             chunk_inputs = expanded_input_ids[chunk_start:chunk_end]
