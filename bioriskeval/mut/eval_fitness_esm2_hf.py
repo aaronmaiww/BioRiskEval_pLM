@@ -289,16 +289,31 @@ def main():
         "dms",
         f"size_{model_size}",
     ]
-    if model_tier != "unknown":
-        tags.append(f"trained_tier_{model_tier}")
+
+    # Determine trained_on tag based on model type
     if model_type != "unknown":
-        tags.append(f"type_{model_type}")
-    if model_subtype:
-        tags.append(f"subtype_{model_subtype}")
+        # Non-tier-based models (R, C, I with optional subtype)
+        if model_type == "R":
+            tags.append("trained_on_random")
+        elif model_type == "I":
+            tags.append("trained_on_insert_unk")
+        elif model_type == "C" and model_subtype == "P":
+            tags.append("trained_on_corrupt_PG")
+        elif model_type == "C":
+            tags.append("trained_on_corrupt")
+    elif model_tier != "unknown":
+        # Tier-based models (T1, T2, H, F, etc.)
+        tags.append(f"trained_on_{model_tier}")
+
+    # Add percentage tag (extract number only)
     if model_percentage:
-        tags.append(f"pct_{model_percentage}")
+        pct_num = model_percentage.rstrip("P")
+        tags.append(f"pct_{pct_num}")
+
+    # Add duplication tag (extract number only)
     if model_duplication:
-        tags.append(f"dup_{model_duplication}")
+        dup_num = model_duplication.lstrip("D")
+        tags.append(f"dup_{dup_num}")
 
     # Initialize wandb
     wandb.init(
