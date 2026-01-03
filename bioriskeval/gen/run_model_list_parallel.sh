@@ -73,7 +73,7 @@ echo "Distributing ${#CHECKPOINTS[@]} checkpoints across $NUM_GPUS GPUs"
 echo "Max $MAX_JOBS_PER_GPU parallel jobs per GPU"
 
 # Create new tmux session
-tmux new-session -d -s $SESSION_NAME -n "eval"
+tmux new-session -d -s $SESSION_NAME -n "eval" "bash -i"
 
 # Distribute checkpoints across GPUs
 for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
