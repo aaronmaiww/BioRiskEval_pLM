@@ -26,18 +26,6 @@ from bioriskeval.common import (
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
-MODELS = [
-    # 8M
-    "given131/8M_T1", "given131/8M_T2", "given131/8M_T5", "given131/8M_T6",
-    "given131/8M_H",  "given131/8M_F",
-    # 35M
-    "given131/35M_T1", "given131/35M_T2", "given131/35M_T5", "given131/35M_T6",
-    "given131/35M_H",  "given131/35M_F",
-    # 150M
-    "given131/150M_T1", "given131/150M_T2", "given131/150M_T5", "given131/150M_T6",
-    "given131/150M_H",  "given131/150M_F",
-]
-
 
 def generate_fasta_path(tier: str) -> str:
     """
