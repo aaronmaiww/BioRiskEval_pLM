@@ -105,7 +105,7 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     cmd+="    echo \"GPU $gpu_id: Launching \$ckpt\"; "
     cmd+="    PYTHONPATH=$PROJECT_ROOT python bioriskeval/gen/eval_ppl_esm2.py "
     cmd+="--tier $TIER "
-    cmd+="--ckpt-path given131/\$ckpt "
+    cmd+="--model-name given131/\$ckpt "
     cmd+="--batch-size $BATCH_SIZE "
     cmd+="--mask-chunk-size $MASK_CHUNK_SIZE "
     cmd+="--num-prefetch $NUM_PREFETCH & "
