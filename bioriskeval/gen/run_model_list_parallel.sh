@@ -118,7 +118,7 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     cmd+="  echo \"--- GPU $gpu_id: Batch completed ---\"; "
     cmd+="done; "
     cmd+="echo '=== GPU $gpu_id: All checkpoints completed ==='; "
-    cmd+="echo 'Press any key to exit.'; read"
+    cmd+="echo '=== GPU $gpu_id: All checkpoints completed ==='; exec bash"
 
     # Create pane for this GPU
     if [ $gpu_id -eq 0 ]; then
