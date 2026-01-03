@@ -12,8 +12,16 @@ NUM_PREFETCH="4"
 # Virtual environment path
 VENV_PATH="/venv/main"
 
-# Number of GPUs available
-NUM_GPUS=4  # Adjust this to your setup
+# Project root directory
+PROJECT_ROOT="/workspace/BioRiskEval_pLM"
+
+# Auto-detect number of GPUs
+NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+if [ "$NUM_GPUS" -eq 0 ]; then
+    echo "Error: No GPUs detected"
+    exit 1
+fi
+echo "Detected $NUM_GPUS GPUs"
 
 # Max parallel jobs per GPU
 MAX_JOBS_PER_GPU=4
@@ -79,7 +87,8 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
 
     # Build command to run checkpoints for this GPU with parallelism
     cmd="source $VENV_PATH/bin/activate && "
-    cmd+="cd /workspace/BioRiskEval_pLM && "
+    cmd+="cd $PROJECT_ROOT && "
+    cmd+="export PYTHONPATH=$PROJECT_ROOT:\$PYTHONPATH; "
     cmd+="export CUDA_VISIBLE_DEVICES=$gpu_id; "
     cmd+="echo '=== GPU $gpu_id: Running ${#gpu_checkpoints[@]} checkpoints (max $MAX_JOBS_PER_GPU parallel) ==='; "
 
@@ -94,7 +103,7 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     cmd+="  for ((j=i; j<batch_end; j++)); do "
     cmd+="    ckpt=\${checkpoints[\$j]}; "
     cmd+="    echo \"GPU $gpu_id: Launching \$ckpt\"; "
-    cmd+="    python bioriskeval/gen/eval_ppl_esm2.py "
+    cmd+="    PYTHONPATH=$PROJECT_ROOT python bioriskeval/gen/eval_ppl_esm2.py "
     cmd+="--tier $TIER "
     cmd+="--ckpt-path given131/\$ckpt "
     cmd+="--batch-size $BATCH_SIZE "
