@@ -1,27 +1,17 @@
-# goal get esm2-ppl for fasta sequences 
-# Optimized for RTX 5090 32GB
-
 import argparse
-import torch
-from Bio import SeqIO
-from typing import List, Dict
-import time
-import numpy as np
 import os
-import wandb
+import time
+from typing import Dict, List
 
-from bioriskeval.common import (
-    parse_model_tier, 
-    parse_model_size, 
-    load_esm2_model,
-    cleanup_gpu_memory,
-    setup_model_optimizations,
-    ProteinSequenceDataset,
-    collate_batch_tensors,
-    compute_batch_pseudo_ppl_from_tensors,
-    process_sequence_group_batch,
-    compute_pseudo_ppl_hf_batch,
-)
+import numpy as np
+import torch
+import wandb
+from Bio import SeqIO
+
+from bioriskeval.common import (cleanup_gpu_memory,
+                                compute_pseudo_ppl_hf_batch, load_esm2_model,
+                                parse_model_size, parse_model_tier,
+                                setup_model_optimizations)
 
 # Performance optimizations
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
@@ -36,7 +26,7 @@ def generate_fasta_path(tier: str) -> str:
     Returns:
         str: Path to the FASTA file
     """
-    return f"/workspace/BioRiskEval_pLM/tier-list/tier{tier}_sequences.fasta"
+    return f"/workspace/BioRiskEval_pLM/tier-list/tier{tier}.fasta"
 
 def generate_output_filename(model_name: str, tier: str) -> str:
     """
@@ -337,7 +327,7 @@ def main():
     
     # Save results with config details
     import datetime
-    
+
     # Create config info
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     config_info = {
