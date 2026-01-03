@@ -39,7 +39,7 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-import flash_attn  # noqa: F401 - Import to ensure Flash Attention is available
+# import flash_attn  # noqa: F401 - Import to ensure Flash Attention is available
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -343,7 +343,7 @@ def load_esm2_model(model_name: str) -> tuple:
     # Load model with attention implementation
     model = EsmForMaskedLM.from_pretrained(
         facebook_model,
-        attn_implementation="flash_attention_2",
+        # attn_implementation="flash_attention_2",
     )
     
     # Load custom weights from HuggingFace model
