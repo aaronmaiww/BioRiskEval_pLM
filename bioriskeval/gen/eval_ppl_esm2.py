@@ -69,7 +69,7 @@ def load_sequences_from_fasta(fasta_path: str) -> tuple[List[str], List[str]]:
     return sequences, seq_ids
 
 
-def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D", 
+def eval_ppl_esm2(fasta_path: str, model_name: str, 
                   batch_size: int = 256, aggregate: str = "mean",
                   max_seq_len: int = 1024, mask_chunk_size: int = 512,
                   num_workers: int = 4, use_compile: bool = False, 
@@ -79,7 +79,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
 
     Args:
         fasta_path (str): Path to the input FASTA file.
-        ckpt_path (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D") or path to local weights file (.pt or .pth)
+        model_name (str): HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D") or path to local weights file (.pt or .pth)
         batch_size (int): Batch size for processing sequences.
         aggregate (str): "sum" for total log-likelihood, "mean" for average log-likelihood
         mask_chunk_size (int): Number of masked positions evaluated per forward.
@@ -94,7 +94,7 @@ def eval_ppl_esm2(fasta_path: str, ckpt_path: str = "facebook/esm2_t6_8M_UR50D",
     # Load ESM2 model using HuggingFace
     print("Loading model...")
     model_load_start = time.time()
-    model, tokenizer = load_esm2_model(ckpt_path=ckpt_path)
+    model, tokenizer = load_esm2_model(model_name=model_name) # model_name is a HuggingFace model name (e.g., "facebook/esm2_t6_8M_UR50D") or path to local weights file (.pt or .pth)
     
     # Apply optimizations
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -216,9 +216,8 @@ def main():
         help="Tier number for sequences (e.g., '1', '2', '3'). Will load from /workspace/BioRiskEval_pLM/tier-list/tier{tier}_sequences.fasta",
     )
     parser.add_argument(
-        "--ckpt-path",
+        "--model-name",
         type=str,
-        default="facebook/esm2_t6_8M_UR50D",
         help="HuggingFace model name or path to local weights file (.pt or .pth). Examples: 'facebook/esm2_t6_8M_UR50D', 'given131/8M_T1', 'path/to/weights.pt'.",
     )
     parser.add_argument(
@@ -279,13 +278,13 @@ def main():
     # Generate output filename if not provided
     os.makedirs("output", exist_ok=True)
     if args.output is None:
-        output_path = generate_output_filename(args.ckpt_path, args.tier)
+        output_path = generate_output_filename(args.model_name, args.tier)
     else:
         output_path = args.output
 
     # Generate wandb run name: {model_name}_eval_on_{eval_tier}
     # Extract model name from path (e.g., "given131/150M_T1" -> "150M_T1")
-    model_name = args.ckpt_path.split("/")[-1]
+    model_name = args.model_name.split("/")[-1]
     wandb_run_name = f"{model_name}_eval_on_{args.tier}"
 
     # Initialize wandb
@@ -293,7 +292,7 @@ def main():
         project="esm2-gen-eval-random",
         name=wandb_run_name,
         config={
-            "model_ckpt": args.ckpt_path,
+            "model_name": args.model_name,
             "eval_tier": args.tier,
             "batch_size": args.batch_size,
             "max_seq_len": args.max_seq_len,
@@ -307,11 +306,11 @@ def main():
             "output_path": output_path,
         },
         tags=[f"tier_{args.tier}",
-              f"trained_on_{parse_model_tier(args.ckpt_path)}",
-              f"size_{parse_model_size(args.ckpt_path)}"]
+              f"trained_on_{parse_model_tier(args.model_name)}",
+              f"size_{parse_model_size(args.model_name)}"]
     )
 
-    print(f"Evaluating perplexity using ESM2 model: {args.ckpt_path}")
+    print(f"Evaluating perplexity using ESM2 model: {args.model_name}")
     print(f"Tier: {args.tier}")
     print(f"Input FASTA: {fasta_path}")
     print(f"Output file: {output_path}")
@@ -326,7 +325,7 @@ def main():
 
     results = eval_ppl_esm2(
         fasta_path=fasta_path,
-        ckpt_path=args.ckpt_path,
+        model_name=args.model_name,
         batch_size=args.batch_size,
         aggregate=args.aggregate,
         max_seq_len=args.max_seq_len,
@@ -343,7 +342,7 @@ def main():
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     config_info = {
         "timestamp": timestamp,
-        "model": args.ckpt_path,
+        "model": args.model_name,
         "tier": args.tier,
         "fasta_file": fasta_path,
         "batch_size": args.batch_size,
