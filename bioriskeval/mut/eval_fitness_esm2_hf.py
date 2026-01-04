@@ -247,7 +247,7 @@ def main():
     parser.add_argument(
         "--use-compile",
         action="store_true",
-        default=False,
+        default=True,
         help="Use torch.compile() for model optimization (PyTorch 2.0+). ~20-40%% faster after warmup."
     )
     parser.add_argument(
@@ -317,7 +317,7 @@ def main():
 
     # Initialize wandb
     wandb.init(
-        project="esm2-fitness-eval",
+        project="esm2-fitness-eval-corruption",
         name=wandb_run_name,
         config={
             "model_name": args.model_name,
