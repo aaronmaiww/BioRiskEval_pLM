@@ -11,7 +11,14 @@ import re
 from pathlib import Path
 from typing import Tuple, cast, Optional
 
-from bioriskeval.common import parse_model_tier, parse_model_size
+from bioriskeval.common import (
+    parse_model_tier,
+    parse_model_size,
+    parse_model_type,
+    parse_model_subtype,
+    parse_model_percentage,
+    parse_model_duplication,
+)
 
 """
 This script trains a linear regression probe (single linear layer) on a dataset
@@ -189,7 +196,11 @@ if __name__ == "__main__":
     model_name = args.custom_weights if args.custom_weights else args.dataset_dir
     model_size = parse_model_size(model_name)
     model_tier = parse_model_tier(model_name)
-    output_csv = f"{model_size}_{model_tier}.csv"
+    model_type = parse_model_type(model_name)
+    model_subtype = parse_model_subtype(model_name)
+    model_percentage = parse_model_percentage(model_name)
+    model_duplication = parse_model_duplication(model_name)
+    output_csv = f"{model_size}_{model_type}_{model_subtype}_{model_percentage}_{model_duplication}.csv"
     print(f"Output CSV filename: {output_csv}")
     
     # Find all layer files in the directory
