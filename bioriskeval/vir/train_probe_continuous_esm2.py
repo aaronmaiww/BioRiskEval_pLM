@@ -224,7 +224,7 @@ if __name__ == "__main__":
         run_name += f"_{os.path.basename(args.custom_weights).replace('.pt', '').replace('.pth', '')}"
     
     wandb.init(
-        project="esm2-eval-virulence",
+        project="esm2-eval-virulence-corruption",
         name=run_name,
         config={
             "dataset_dir": args.dataset_dir,
