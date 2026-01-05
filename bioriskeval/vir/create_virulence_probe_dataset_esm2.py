@@ -42,6 +42,10 @@ from bioriskeval.common import (
     setup_model_optimizations,
     parse_model_size,
     parse_model_tier,
+    parse_model_type,
+    parse_model_subtype,
+    parse_model_percentage,
+    parse_model_duplication,
 )
 
 # Configure logging
@@ -163,7 +167,30 @@ def create_probe_dataset_hf(args):
     # Create model-specific output directory
     model_size = parse_model_size(args.model_name)
     model_tier = parse_model_tier(args.model_name)
-    model_dir_name = f"{model_size}_{model_tier}"
+    model_type = parse_model_type(args.model_name)
+    model_subtype = parse_model_subtype(args.model_name)
+    model_percentage = parse_model_percentage(args.model_name)
+    model_duplication = parse_model_duplication(args.model_name)
+    
+    # Build model directory name based on available metadata
+    if model_type != "unknown":
+        # Non-tier-based models (R, C, I with optional subtype)
+        if model_subtype and model_subtype != "unknown":
+            model_dir_name = f"{model_size}_{model_type}_{model_subtype}"
+        else:
+            model_dir_name = f"{model_size}_{model_type}"
+        
+        # Add percentage if available
+        if model_percentage:
+            model_dir_name += f"_{model_percentage}"
+        
+        # Add duplication if available
+        if model_duplication:
+            model_dir_name += f"_{model_duplication}"
+    else:
+        # Fallback to tier-based naming
+        model_dir_name = f"{model_size}_{model_tier}"
+    
     model_output_dir = os.path.join(args.output_dir, model_dir_name)
     os.makedirs(model_output_dir, exist_ok=True)
     logger.info(f"Output directory: {os.path.abspath(model_output_dir)}")
