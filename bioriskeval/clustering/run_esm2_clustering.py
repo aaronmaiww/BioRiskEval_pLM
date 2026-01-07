@@ -81,11 +81,28 @@ def load_model_list_from_file(path: str) -> List[str]:
     return models
 
 
-def mean_pool_last_hidden(
+def mean_pool_selected_layers(
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor,
+    layer_indices: Sequence[int],
 ) -> torch.Tensor:
-    """Mean pool the last layer representations ignoring special tokens."""
+    """Mean pool the selected hidden layers ignoring special tokens."""
+    if not layer_indices:
+        raise ValueError("At least one layer index must be provided.")
+
+    num_layers = hidden_states.shape[0]
+    normalized_indices: List[int] = []
+    for layer_idx in layer_indices:
+        normalized = layer_idx if layer_idx >= 0 else layer_idx + num_layers
+        if normalized < 0 or normalized >= num_layers:
+            raise IndexError(
+                f"Layer index {layer_idx} out of range for {num_layers} layers."
+            )
+        normalized_indices.append(normalized)
+
+    selected_states = hidden_states[normalized_indices]
+    aggregated_states = selected_states.mean(dim=0)
+
     pooled_mask = attention_mask.clone()
     seq_len = pooled_mask.shape[1]
     if seq_len >= 1:
@@ -94,7 +111,7 @@ def mean_pool_last_hidden(
 
     expanded_mask = pooled_mask.unsqueeze(-1)
     lengths = pooled_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
-    return (hidden_states * expanded_mask).sum(dim=1) / lengths
+    return (aggregated_states * expanded_mask).sum(dim=1) / lengths
 
 
 def embed_sequences(
@@ -104,8 +121,9 @@ def embed_sequences(
     device: torch.device,
     batch_size: int,
     max_seq_len: int,
+    layer_indices: Sequence[int],
 ) -> np.ndarray:
-    """Convert sequences into mean-pooled embeddings from the last encoder."""
+    """Convert sequences into mean-pooled embeddings from the selected encoder layers."""
     if not sequences:
         return np.zeros((0, model.config.hidden_size), dtype=np.float32)
 
@@ -137,8 +155,10 @@ def embed_sequences(
                 **encoded, output_hidden_states=True, return_dict=True
             )
 
-        hidden_states = outputs.hidden_states[-1]
-        pooled = mean_pool_last_hidden(hidden_states, encoded["attention_mask"])
+            hidden_states = torch.stack(outputs.hidden_states, dim=0)
+            pooled = mean_pool_selected_layers(
+                hidden_states, encoded["attention_mask"], layer_indices
+            )
         embeddings.append(pooled.detach().cpu())
 
     stacked = torch.cat(embeddings, dim=0)
@@ -360,6 +380,16 @@ def main() -> None:
         help="Maximum sequence length for tokenization.",
     )
     parser.add_argument(
+        "--layer-indices",
+        type=int,
+        nargs="+",
+        default=[-1],
+        help=(
+            "Encoder hidden layer indexes to mean pool (zero-based, "
+            "negative values count from the end)."
+        ),
+    )
+    parser.add_argument(
         "--min-cluster-size",
         type=int,
         default=30,
@@ -442,7 +472,8 @@ def main() -> None:
             "min_cluster_size": args.min_cluster_size,
             "device": str(device),
             "use_compile": args.use_compile,
-            "model_list_path": args.model_list_path,
+        "layer_indices": args.layer_indices,
+        "model_list_path": args.model_list_path,
         },
         tags=[args.model_size, args.policy],
     )
@@ -474,6 +505,7 @@ def main() -> None:
                 device,
                 batch_size=args.batch_size,
                 max_seq_len=args.max_seq_len,
+                layer_indices=args.layer_indices,
             )
 
             embedding_store[(model_short, tier)] = embeddings

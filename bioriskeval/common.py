@@ -358,7 +358,7 @@ def load_esm2_model(model_name: str) -> tuple:
         # Extract model_state_dict from the ordered_dict
         if 'model_state_dict' in custom_state_dict:
             model_weights = custom_state_dict['model_state_dict']
-            print("Found 'model_state_dict' in checkpoint")
+            # print("Found 'model_state_dict' in checkpoint")
         else:
             print("Warning: 'model_state_dict' not found, using full state dict")
             model_weights = custom_state_dict
@@ -395,7 +395,7 @@ def setup_model_optimizations(model, device, use_compile: bool = False):
     
     # Always use BF16
     model = model.to(dtype=torch.bfloat16)
-    print(f"Model loaded on {device} with BF16 precision")
+    # print(f"Model loaded on {device} with BF16 precision")
     
     torch.backends.cudnn.benchmark = True
     
@@ -408,7 +408,7 @@ def setup_model_optimizations(model, device, use_compile: bool = False):
 
     # Apply torch.compile for optimized execution (PyTorch 2.0+)
     if use_compile and hasattr(torch, 'compile'):
-        print("Compiling model with torch.compile()...")
+        # print("Compiling model with torch.compile()...")
         compile_start = time.time()
         # Use mode="default" instead of "reduce-overhead" to avoid CUDA Graph issues
         # with ESM's rotary embeddings which have dynamic cached tensors
