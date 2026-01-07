@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import datetime
 import os
+from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
@@ -34,6 +35,9 @@ MODEL_GROUPS: Dict[str, List[str]] = {
     "35M": ["35M_T1", "35M_T2", "35M_T5", "35M_T6", "35M_H", "35M_F"],
     "150M": ["150M_T1", "150M_T2", "150M_T5", "150M_T6", "150M_H", "150M_F"],
 }
+DEFAULT_CORRUPTION_MODEL_LIST = str(
+    Path(__file__).resolve().parents[1] / "model_list"
+)
 
 
 def get_full_model_name(model_short: str) -> str:
@@ -60,6 +64,21 @@ def load_tier_sequences(
         seq_ids.append(record.id)
 
     return sequences, seq_ids
+
+
+def load_model_list_from_file(path: str) -> List[str]:
+    """Return non-empty checkpoint names listed in the provided file."""
+    absolute_path = os.path.abspath(path)
+    if not os.path.isfile(absolute_path):
+        raise FileNotFoundError(f"Missing model list: {absolute_path}")
+
+    with open(absolute_path, "r", encoding="utf-8") as handle:
+        models = [line.strip() for line in handle if line.strip()]
+
+    if not models:
+        raise ValueError(f"No models listed in {absolute_path}")
+
+    return models
 
 
 def mean_pool_last_hidden(
@@ -292,6 +311,18 @@ def main() -> None:
         description="Cluster ESM2 checkpoints on tier FASTA files."
     )
     parser.add_argument(
+        "--policy",
+        choices=["filtering", "corruption"],
+        default="filtering",
+        help="Model selection policy (filtering uses size groups, corruption reads @model_list).",
+    )
+    parser.add_argument(
+        "--model-list-path",
+        type=str,
+        default=DEFAULT_CORRUPTION_MODEL_LIST,
+        help="Path to newline-separated corruption checkpoints used with --policy=corruption.",
+    )
+    parser.add_argument(
         "--model-size",
         choices=list(MODEL_GROUPS.keys()),
         required=True,
@@ -381,7 +412,10 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    model_list = MODEL_GROUPS[args.model_size]
+    if args.policy == "filtering":
+        model_list = MODEL_GROUPS[args.model_size]
+    else:
+        model_list = load_model_list_from_file(args.model_list_path)
 
     tier_sequences: Dict[int, Dict[str, List[str]]] = {}
     for tier in args.tiers:
@@ -393,13 +427,14 @@ def main() -> None:
 
     run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = ensure_output_path(args.output_dir, run_id)
-    run_name = f"{args.model_size}_clustering_{run_id}"
+    run_name = f"{args.policy}_{args.model_size}_clustering_{run_id}"
 
     wandb_run = wandb.init(
         project=args.wandb_project,
         name=run_name,
         config={
             "model_size": args.model_size,
+            "policy": args.policy,
             "tiers": args.tiers,
             "max_sequences": args.max_sequences,
             "batch_size": args.batch_size,
@@ -407,8 +442,9 @@ def main() -> None:
             "min_cluster_size": args.min_cluster_size,
             "device": str(device),
             "use_compile": args.use_compile,
+            "model_list_path": args.model_list_path,
         },
-        tags=[args.model_size],
+        tags=[args.model_size, args.policy],
     )
 
     for tier, tier_data in tier_sequences.items():
