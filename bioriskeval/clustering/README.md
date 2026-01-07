@@ -27,9 +27,11 @@ python bioriskeval/clustering/run_esm2_clustering.py \
   --max-sequences 512 \
   --batch-size 32 \
   --min-cluster-size 30 \
-  --policy filtering \  #`corruption` is also doable.
+  --policy filtering \
   --layer-indices -2 -1
 ```
+
+(`--policy filtering` remains the default, but `--policy corruption` is also an option.)
 
 The script loads sequences from `/workspace/BioRiskEval_pLM/tier-list/tier{N}.fasta`, processes the requested number of sequences per tier, and uses `bioriskeval/common.py` helpers to load each checkpoint via `load_esm2_model`.
 

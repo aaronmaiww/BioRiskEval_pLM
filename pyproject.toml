@@ -36,6 +36,11 @@ dependencies = [
 
 [project.optional-dependencies]
 build = ['flash-attn', 'pip']
+clustering = [
+    "hdbscan",
+    "matplotlib",
+    "scikit-learn",
+]
 
 [tool.uv.workspace]
 members = ["3rdparty/*", "internal/infra-bionemo/", "sub-packages/bionemo-*/"]

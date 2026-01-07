@@ -192,9 +192,9 @@ def embed_sequences(
         hidden_states = torch.stack(outputs.hidden_states, dim=0)
         if layer_count is None:
             layer_count = hidden_states.shape[0]
-            pooled = mean_pool_selected_layers(
-                hidden_states, encoded["attention_mask"], layer_indices
-            )
+        pooled = mean_pool_selected_layers(
+            hidden_states, encoded["attention_mask"], layer_indices
+        )
         embeddings.append(pooled.detach().cpu())
 
     stacked = torch.cat(embeddings, dim=0)

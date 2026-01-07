@@ -11,14 +11,7 @@ import re
 from pathlib import Path
 from typing import Tuple, cast, Optional
 
-from bioriskeval.common import (
-    parse_model_tier,
-    parse_model_size,
-    parse_model_type,
-    parse_model_subtype,
-    parse_model_percentage,
-    parse_model_duplication,
-)
+from bioriskeval.common import parse_model_tier, parse_model_size
 
 """
 This script trains a linear regression probe (single linear layer) on a dataset
