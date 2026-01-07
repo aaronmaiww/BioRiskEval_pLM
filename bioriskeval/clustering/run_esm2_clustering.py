@@ -7,7 +7,7 @@ import contextlib
 import datetime
 import os
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,7 +20,6 @@ from tqdm import tqdm
 
 from bioriskeval.common import (
     load_esm2_model,
-    parse_model_tier,
     setup_model_optimizations,
 )
 
@@ -81,25 +80,56 @@ def load_model_list_from_file(path: str) -> List[str]:
     return models
 
 
+def normalize_layer_indices(
+    layer_indices: Sequence[int], num_layers: int
+) -> List[int]:
+    """Normalize layer indexes to be in the range [0, num_layers)."""
+    if num_layers <= 0:
+        raise ValueError("Model must expose at least one hidden layer.")
+    if not layer_indices:
+        raise ValueError("At least one layer index must be provided.")
+
+    normalized: List[int] = []
+    for layer_idx in layer_indices:
+        normalized_idx = layer_idx if layer_idx >= 0 else layer_idx + num_layers
+        if normalized_idx < 0 or normalized_idx >= num_layers:
+            raise IndexError(
+                f"Layer index {layer_idx} out of range for {num_layers} layers."
+            )
+        normalized.append(normalized_idx)
+    return normalized
+
+
+def describe_layer_selection(
+    layer_indices: Sequence[int], num_layers: int
+) -> Tuple[str, str]:
+    """Return human-readable and filename-friendly layer descriptions."""
+    normalized = normalize_layer_indices(layer_indices, num_layers)
+    human_readable = ", ".join(str(idx + 1) for idx in normalized)
+    suffix = "_".join(str(idx + 1) for idx in normalized)
+    file_tag = f"layers_{suffix}_of_{num_layers}"
+    return f"Layer(s) {human_readable} of {num_layers}", file_tag
+
+
+def infer_hidden_state_count_from_config(model) -> Optional[int]:
+    """Estimate hidden state list length from the model config as a fallback."""
+    num_hidden = getattr(model.config, "num_hidden_layers", None)
+    if num_hidden:
+        return num_hidden + 1
+    num_layers = getattr(model.config, "num_layers", None)
+    if num_layers:
+        return num_layers + 1
+    return None
+
+
 def mean_pool_selected_layers(
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor,
     layer_indices: Sequence[int],
 ) -> torch.Tensor:
     """Mean pool the selected hidden layers ignoring special tokens."""
-    if not layer_indices:
-        raise ValueError("At least one layer index must be provided.")
-
     num_layers = hidden_states.shape[0]
-    normalized_indices: List[int] = []
-    for layer_idx in layer_indices:
-        normalized = layer_idx if layer_idx >= 0 else layer_idx + num_layers
-        if normalized < 0 or normalized >= num_layers:
-            raise IndexError(
-                f"Layer index {layer_idx} out of range for {num_layers} layers."
-            )
-        normalized_indices.append(normalized)
-
+    normalized_indices = normalize_layer_indices(layer_indices, num_layers)
     selected_states = hidden_states[normalized_indices]
     aggregated_states = selected_states.mean(dim=0)
 
@@ -122,12 +152,16 @@ def embed_sequences(
     batch_size: int,
     max_seq_len: int,
     layer_indices: Sequence[int],
-) -> np.ndarray:
+) -> Tuple[np.ndarray, int]:
     """Convert sequences into mean-pooled embeddings from the selected encoder layers."""
     if not sequences:
-        return np.zeros((0, model.config.hidden_size), dtype=np.float32)
+        return np.zeros(
+            (0, model.config.hidden_size), dtype=np.float32
+        ), 0
 
     embeddings: List[torch.Tensor] = []
+
+    layer_count: Optional[int] = None
 
     for batch_start in tqdm(
         range(0, len(sequences), batch_size),
@@ -155,14 +189,16 @@ def embed_sequences(
                 **encoded, output_hidden_states=True, return_dict=True
             )
 
-            hidden_states = torch.stack(outputs.hidden_states, dim=0)
+        hidden_states = torch.stack(outputs.hidden_states, dim=0)
+        if layer_count is None:
+            layer_count = hidden_states.shape[0]
             pooled = mean_pool_selected_layers(
                 hidden_states, encoded["attention_mask"], layer_indices
             )
         embeddings.append(pooled.detach().cpu())
 
     stacked = torch.cat(embeddings, dim=0)
-    return stacked.numpy()
+    return stacked.numpy(), layer_count or 0
 
 
 def stack_embeddings_by_tier(
@@ -472,8 +508,8 @@ def main() -> None:
             "min_cluster_size": args.min_cluster_size,
             "device": str(device),
             "use_compile": args.use_compile,
-        "layer_indices": args.layer_indices,
-        "model_list_path": args.model_list_path,
+            "layer_indices": args.layer_indices,
+            "model_list_path": args.model_list_path,
         },
         tags=[args.model_size, args.policy],
     )
@@ -484,6 +520,9 @@ def main() -> None:
         )
 
     embedding_store: Dict[Tuple[str, int], np.ndarray] = {}
+    layer_title_suffix: Optional[str] = None
+    layer_file_suffix: Optional[str] = None
+    config_layer_count: Optional[int] = None
 
     for model_short in tqdm(model_list, desc="Models"):
         full_name = get_full_model_name(model_short)
@@ -492,13 +531,17 @@ def main() -> None:
         model = setup_model_optimizations(model, device, args.use_compile)
         model.eval()
 
+        model_layer_count = infer_hidden_state_count_from_config(model)
+        if config_layer_count is None and model_layer_count:
+            config_layer_count = model_layer_count
+
         for tier in args.tiers:
             sequences = tier_sequences[tier]["sequences"]
             if not sequences:
                 continue
 
             print(f"Embedding {model_short} on tier{tier} ({len(sequences)} seqs)...")
-            embeddings = embed_sequences(
+            embeddings, observed_layer_count = embed_sequences(
                 model,
                 tokenizer,
                 sequences,
@@ -510,8 +553,21 @@ def main() -> None:
 
             embedding_store[(model_short, tier)] = embeddings
 
+            if layer_file_suffix is None and observed_layer_count:
+                layer_title_suffix, layer_file_suffix = describe_layer_selection(
+                    args.layer_indices, observed_layer_count
+                )
+
         del model, tokenizer
         torch.cuda.empty_cache()
+
+    if layer_file_suffix is None and config_layer_count:
+        layer_title_suffix, layer_file_suffix = describe_layer_selection(
+            args.layer_indices, config_layer_count
+        )
+
+    plot_layer_label = layer_title_suffix or "layer selection"
+    plot_layer_file_tag = layer_file_suffix or "layers_unknown"
 
     # Tier-oriented figures: same tier across different checkpoints.
     for tier in args.tiers:
@@ -526,8 +582,8 @@ def main() -> None:
             stacked, args.min_cluster_size
         )
         coords = project_embeddings(scaled)
-        title = f"{args.model_size} checkpoints on tier{tier}"
-        fig_name = f"tier_{tier}_per_model.png"
+        title = f"{args.model_size} checkpoints on tier{tier} ({plot_layer_label})"
+        fig_name = f"tier_{tier}_per_model_{plot_layer_file_tag}.png"
         fig_path = os.path.join(output_path, fig_name)
 
         metrics = plot_cluster_summary(
@@ -563,8 +619,8 @@ def main() -> None:
             stacked, args.min_cluster_size
         )
         coords = project_embeddings(scaled)
-        title = f"{model_short} across tiers"
-        fig_name = f"{model_short}_per_tier.png"
+        title = f"{model_short} across tiers ({plot_layer_label})"
+        fig_name = f"{model_short}_per_tier_{plot_layer_file_tag}.png"
         fig_path = os.path.join(output_path, fig_name)
 
         metrics = plot_cluster_summary(
